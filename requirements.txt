@@ -3,20 +3,16 @@ numpy
 scipy
 torch
 
-# TorchSig (install via pip or GitHub)
-torchsig
+# TorchSig is optional and local-only; install with `uv sync --extra torchsig-local`
 
 # Config + serialization
 pyyaml
 
-# GUI (pick one, see below)
-# Option A: simple + fast
+# GUI
 streamlit
 
-# Option B: more control (desktop app)
-# PyQt6
-
 # Data handling
+h5py
 pandas
 
 # Visualization (for previews later)

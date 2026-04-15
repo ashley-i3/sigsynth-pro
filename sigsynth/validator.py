@@ -10,6 +10,7 @@ from sigsynth.registry import (
 
 
 REQUIRED_GLOBALS = {"sample_rate", "duration", "snr_db"}
+VALID_OUTPUT_FORMATS = {"hdf5", "numpy"}
 
 
 def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
@@ -18,6 +19,11 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
 
     if not config.generators:
         errors.append("Select at least one generator.")
+
+    if config.dataset.output_format not in VALID_OUTPUT_FORMATS:
+        errors.append(
+            f"Unsupported output format '{config.dataset.output_format}'. Choose hdf5 or numpy."
+        )
 
     missing_globals = REQUIRED_GLOBALS - set(config.global_params.keys())
     if missing_globals:
@@ -74,15 +80,16 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
 
     if config.dataset.total_samples < 2:
         errors.append("Total samples must be >= 2.")
-    if not 0.0 < config.dataset.train_ratio < 1.0:
-        errors.append("Train ratio must be between 0 and 1.")
-    else:
-        train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
-        val_count = config.dataset.total_samples - train_count
-        if train_count == 0 or val_count == 0:
-            warnings.append(
-                "Train/validation split produces a zero-sized partition "
-                f"(train={train_count}, val={val_count})."
-            )
+    if config.dataset.output_format == "numpy":
+        if not 0.0 < config.dataset.train_ratio < 1.0:
+            errors.append("Train ratio must be between 0 and 1 for NumPy output.")
+        else:
+            train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
+            val_count = config.dataset.total_samples - train_count
+            if train_count == 0 or val_count == 0:
+                warnings.append(
+                    "Train/validation split produces a zero-sized partition "
+                    f"(train={train_count}, val={val_count})."
+                )
 
     return errors, warnings

@@ -17,9 +17,9 @@
       ]
     }
   },
-  "updateContentCommand": "git submodule update --init --recursive && pip3 install --user uv && uv sync && echo '✅ Packages installed and Requirements met'",
+  "updateContentCommand": "git submodule update --init --recursive && pip3 install --user uv && uv sync --extra torchsig-local && echo '✅ Packages installed and Requirements met'",
   "postAttachCommand": {
-    "server": "uv run streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false"
+    "server": "uv run --extra torchsig-local streamlit run app.py --server.enableCORS false --server.enableXsrfProtection false"
   },
   "portsAttributes": {
     "8501": {

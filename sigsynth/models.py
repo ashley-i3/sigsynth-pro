@@ -34,6 +34,7 @@ class DatasetConfig:
     total_samples: int = 1000
     train_ratio: float = 0.8
     output_dir: str = "output/dataset"
+    output_format: str = "hdf5"
 
 
 @dataclass

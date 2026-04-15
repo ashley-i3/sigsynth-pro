@@ -9,6 +9,7 @@ description = "TorchSig dataset builder and macro UI"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "h5py",
     "matplotlib",
     "numpy",
     "pandas",
@@ -17,7 +18,11 @@ dependencies = [
     "streamlit",
     "torch",
     "tqdm",
-    "torchsig",
+]
+
+[project.optional-dependencies]
+torchsig-local = [
+    "torchsig==2.1.0",
 ]
 
 [tool.setuptools]
@@ -27,4 +32,4 @@ include-package-data = true
 include = ["sigsynth*"]
 
 [tool.uv.sources]
-torchsig = { git = "https://github.com/TorchDSP/torchsig.git", tag = "v2.1.0" }
+torchsig = { path = "third_party/torchsig", extra = "torchsig-local" }

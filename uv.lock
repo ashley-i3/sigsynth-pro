@@ -2890,6 +2890,7 @@ name = "sigsynth"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "h5py" },
     { name = "matplotlib" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -2900,12 +2901,17 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "streamlit" },
     { name = "torch" },
-    { name = "torchsig" },
     { name = "tqdm" },
+]
+
+[package.optional-dependencies]
+torchsig-local = [
+    { name = "torchsig" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "h5py" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
@@ -2913,9 +2919,10 @@ requires-dist = [
     { name = "scipy" },
     { name = "streamlit" },
     { name = "torch" },
-    { name = "torchsig", git = "https://github.com/TorchDSP/torchsig.git?tag=v2.1.0" },
+    { name = "torchsig", marker = "extra == 'torchsig-local'", directory = "third_party/torchsig" },
     { name = "tqdm" },
 ]
+provides-extras = ["torchsig-local"]
 
 [[package]]
 name = "six"
@@ -3164,8 +3171,7 @@ wheels = [
 
 [[package]]
 name = "torchsig"
-version = "2.1.0"
-source = { git = "https://github.com/TorchDSP/torchsig.git?tag=v2.1.0#9fff8d6433f93836b374525080e6e138fd0f85bd" }
+source = { directory = "third_party/torchsig" }
 dependencies = [
     { name = "h5py" },
     { name = "lightning" },
@@ -3180,6 +3186,24 @@ dependencies = [
     { name = "ruff" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch" },
+    { name = "torchaudio" },
+    { name = "tqdm" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "h5py" },
+    { name = "lightning" },
+    { name = "matplotlib" },
+    { name = "numpy", specifier = ">=2" },
+    { name = "opencv-python", specifier = ">=4.10" },
+    { name = "pylint" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pyyaml" },
+    { name = "ruff" },
+    { name = "scipy" },
     { name = "torch" },
     { name = "torchaudio" },
     { name = "tqdm" },

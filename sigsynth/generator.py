@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
+import shutil
 from pathlib import Path
 import zipfile
 
 import numpy as np
 
 from sigsynth.models import AppConfig
+from sigsynth.hdf5_export import write_config_yaml, write_torchsig_compatible_hdf5
 from sigsynth.paths import sanitize_output_dir
 from sigsynth.registry import GENERATOR_REGISTRY
 from sigsynth.registry import resolve_generator_name
@@ -108,36 +110,62 @@ def _attempt_torchsig_generation(config: AppConfig, output_dir: Path) -> tuple[b
         return False, str(exc)
 
 
-def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:
-    output_dir = sanitize_output_dir(config.dataset.output_dir)
+def _reset_output_dir(output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for child in output_dir.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
+    rng = np.random.default_rng(seed=53)
+    sample_len = int(config.global_params.get("sample_len", 1024))
     train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
     val_count = config.dataset.total_samples - train_count
 
-    torchsig_generated, torchsig_error = _attempt_torchsig_generation(config, output_dir)
+    layout = [
+        output_dir / "train" / "raw",
+        output_dir / "train" / "impaired",
+        output_dir / "val" / "raw",
+        output_dir / "val" / "impaired",
+    ]
+    for folder in layout:
+        folder.mkdir(parents=True, exist_ok=True)
 
-    rng = np.random.default_rng(seed=53)
-    sample_len = int(config.global_params.get("sample_len", 1024))
+    for split, count in (("train", train_count), ("val", val_count)):
+        for idx in range(count):
+            raw = rng.standard_normal(sample_len) + 1j * rng.standard_normal(sample_len)
+            impaired = raw * (1 + 0.01 * rng.standard_normal(sample_len))
 
-    if not torchsig_generated:
-        layout = [
-            output_dir / "train" / "raw",
-            output_dir / "train" / "impaired",
-            output_dir / "val" / "raw",
-            output_dir / "val" / "impaired",
-        ]
-        for folder in layout:
-            folder.mkdir(parents=True, exist_ok=True)
+            np.save(output_dir / split / "raw" / f"sample_{idx:06d}.npy", raw)
+            np.save(output_dir / split / "impaired" / f"sample_{idx:06d}.npy", impaired)
 
-        for split, count in (("train", train_count), ("val", val_count)):
-            for idx in range(count):
-                raw = rng.standard_normal(sample_len) + 1j * rng.standard_normal(sample_len)
-                impaired = raw * (1 + 0.01 * rng.standard_normal(sample_len))
 
-                np.save(output_dir / split / "raw" / f"sample_{idx:06d}.npy", raw)
-                np.save(output_dir / split / "impaired" / f"sample_{idx:06d}.npy", impaired)
+def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:
+    output_dir = sanitize_output_dir(config.dataset.output_dir)
+    _reset_output_dir(output_dir)
+
+    torchsig_generated = False
+    torchsig_error = ""
+
+    if config.dataset.output_format == "hdf5":
+        train_count = int(config.dataset.total_samples)
+        val_count = 0
+        torchsig_generated, torchsig_error = _attempt_torchsig_generation(config, output_dir)
+        if not torchsig_generated:
+            write_torchsig_compatible_hdf5(output_dir, config, int(config.dataset.total_samples))
+    else:
+        train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
+        val_count = config.dataset.total_samples - train_count
+        _generate_numpy_dataset(config, output_dir)
+
+    write_config_yaml(output_dir, config)
 
     return {
         "output_dir": str(output_dir),
+        "output_format": config.dataset.output_format,
         "train_samples": train_count,
         "val_samples": val_count,
         "torchsig_generated": torchsig_generated,

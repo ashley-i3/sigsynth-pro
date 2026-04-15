@@ -243,13 +243,19 @@ When loading macros:
 ### 7.1 User Inputs
 
 * Total sample count
-* Train/validation split (ratio or count)
+* Output format selector:
+  * TorchSig-compatible HDF5
+  * NumPy split folders
+* Train/validation split ratio for NumPy output
 
 ---
 
 ### 7.2 Output Structure
 
-```
+* TorchSig-compatible HDF5 output produces a `data.h5` dataset at the root, plus `config.yaml` and small metadata files alongside it.
+* NumPy output produces the existing split-folder layout:
+
+```text
 dataset/
 ├── train/
 │   ├── raw/
@@ -270,10 +276,10 @@ dataset/
 
 ### 7.4 Execution Flow
 
-1. Generate raw signals
-2. Apply transform pipeline
-3. Split dataset
-4. Save to structured directories
+1. Generate the selected signal representation
+2. Apply the transform pipeline
+3. Write either TorchSig-compatible HDF5 or NumPy split folders
+4. Package the output for download
 
 ---
 
@@ -424,14 +430,16 @@ streamlit run app.py
 # initialize torchsig submodule (once after clone)
 git submodule update --init --recursive
 
-# create/update environment with local torchsig path source
-uv sync
-uv run streamlit run app.py
+# create/update environment with local torchsig extra enabled
+uv sync --extra torchsig-local
+uv run --extra torchsig-local streamlit run app.py
 ```
 
 ### Notes
 
-- The app now attempts TorchSig-native generation first by combining `TorchSigDefaults().default_dataset_metadata`, `TorchSigIterableDataset`, and `DatasetCreator`, then falls back to NumPy placeholder IQ generation when the TorchSig backend is unavailable or incompatible.
+- The app now lets you choose between TorchSig-compatible HDF5 output and NumPy split folders. For HDF5, it uses TorchSig-native generation when available and falls back to a local `h5py` writer with the same `data.h5` layout when TorchSig is unavailable.
 - Legacy or unknown generator and transform names stay visible in the UI so they can be remapped instead of silently disappearing from loaded macros.
+- The UI shows whether the runtime is using TorchSig-backed generation or the local HDF5 fallback, and the transform preview is labeled as approximate because it uses a synthetic sample for fast feedback.
 - Generated datasets are sandboxed under `output/`, and macro files are constrained to the `macros/` directory.
 - After generation, the app provides a dataset ZIP download button so hosted Streamlit deployments can export generated artifacts.
+- Streamlit Cloud should run the app without the `torchsig-local` extra; TorchSig is only required for local development and is intentionally optional.
