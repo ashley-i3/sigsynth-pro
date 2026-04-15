@@ -32,7 +32,7 @@ if "config" not in st.session_state:
         generators=["BPSK", "QPSK"],
         global_params={
             "sample_rate": 1_000_000,
-            "duration": 0.001,
+            "duration": 0.001024,
             "snr_db": [0, 30],
             "sample_len": 1024,
             "seed": 1234567890,
@@ -263,10 +263,40 @@ DATASET_PRESET_PAIRS = {
     "Wideband impaired val": ("Wideband impaired train", "wideband_impaired"),
 }
 
+OFFICIAL_DATASET_FAMILIES = {
+    "Sig53 official set": [
+        "Sig53 clean train",
+        "Sig53 clean val",
+        "Sig53 impaired train",
+        "Sig53 impaired val",
+        "Sig53 impaired EbNo train",
+        "Sig53 impaired EbNo val",
+    ],
+    "Wideband Sig53 official set": [
+        "Wideband clean train",
+        "Wideband clean val",
+        "Wideband impaired train",
+        "Wideband impaired val",
+    ],
+}
+
+OFFICIAL_DATASET_FAMILY_SLUGS = {
+    "Sig53 official set": "sig53_official",
+    "Wideband Sig53 official set": "wideband_sig53_official",
+}
+
+LENGTH_WIDGET_KEYS = {
+    "sample_rate_hz": "sample_rate_hz",
+    "sample_rate_display": "sample_rate_input",
+    "duration": "duration_input",
+    "sample_len": "sample_len_input",
+}
+
 TORCHSIG_GENERATOR_GROUPS: list[tuple[str, list[str]]] = [
     ("Tones and chirps", ["tone", "chirpss", "lfm-data", "lfm-radar"]),
     ("OFDM", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.startswith("ofdm-")]),
     ("PSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("psk")]),
+    ("ASK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("ask")]),
     ("QAM", [name for name in TORCHSIG_CONCRETE_GENERATORS if "qam" in name]),
     ("FSK / MSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("fsk") or name.endswith("msk")]),
     ("AM / FM / OOK", ["fm", "ook", "am-dsb", "am-dsb-sc", "am-usb", "am-lsb"]),
@@ -302,6 +332,7 @@ def apply_dataset_preset(preset_name: str) -> None:
     config.dataset.total_samples = preset["total_samples"]
     config.dataset.split_mode = preset["split_mode"]
     config.dataset.output_format = preset["output_format"]
+    seed_length_widget_state(config, force=True)
 
 
 def build_config_for_dataset_preset(preset_name: str, output_dir: Path) -> AppConfig:
@@ -340,6 +371,96 @@ def build_config_for_dataset_preset(preset_name: str, output_dir: Path) -> AppCo
     return preset_config
 
 
+def _default_frequency_unit(sample_rate_hz: int) -> str:
+    if sample_rate_hz >= 1_000_000_000:
+        return "GHz"
+    if sample_rate_hz >= 1_000_000:
+        return "MHz"
+    if sample_rate_hz >= 1_000:
+        return "kHz"
+    return "Hz"
+
+
+def _frequency_scale_from_session() -> float:
+    frequency_unit = st.session_state.get("frequency_unit", "Hz")
+    return FREQUENCY_UNITS.get(frequency_unit, 1.0)
+
+
+def seed_length_widget_state(config_obj: AppConfig, force: bool = False) -> None:
+    sample_rate_hz = int(config_obj.global_params.get("sample_rate", 1_000_000))
+    frequency_unit = _default_frequency_unit(sample_rate_hz)
+    frequency_scale = FREQUENCY_UNITS[frequency_unit]
+    defaults = {
+        "frequency_unit": frequency_unit,
+        LENGTH_WIDGET_KEYS["sample_rate_hz"]: sample_rate_hz,
+        LENGTH_WIDGET_KEYS["sample_rate_display"]: sample_rate_hz / frequency_scale,
+        LENGTH_WIDGET_KEYS["duration"]: float(config_obj.global_params.get("duration", 0.001024)),
+        LENGTH_WIDGET_KEYS["sample_len"]: int(config_obj.global_params.get("sample_len", 1024)),
+    }
+    for key, value in defaults.items():
+        if force or key not in st.session_state:
+            st.session_state[key] = value
+    if force or "length_sync_focus" not in st.session_state:
+        st.session_state["length_sync_focus"] = "duration"
+
+
+def sync_length_widget_state(source: str) -> None:
+    sample_rate = max(1.0, float(st.session_state.get(LENGTH_WIDGET_KEYS["sample_rate_hz"], 1_000_000)))
+    duration = max(1e-9, float(st.session_state.get(LENGTH_WIDGET_KEYS["duration"], 0.001024)))
+    sample_len = max(1, int(round(float(st.session_state.get(LENGTH_WIDGET_KEYS["sample_len"], 1024)))))
+
+    if source == "duration":
+        st.session_state[LENGTH_WIDGET_KEYS["sample_len"]] = max(1, int(round(sample_rate * duration)))
+        st.session_state["length_sync_focus"] = "duration"
+    elif source == "sample_len":
+        st.session_state[LENGTH_WIDGET_KEYS["duration"]] = sample_len / sample_rate
+        st.session_state["length_sync_focus"] = "sample_len"
+    elif source == "sample_rate":
+        frequency_scale = _frequency_scale_from_session()
+        sample_rate = max(
+            1.0,
+            float(st.session_state.get(LENGTH_WIDGET_KEYS["sample_rate_display"], 1_000_000 / frequency_scale)) * frequency_scale,
+        )
+        st.session_state[LENGTH_WIDGET_KEYS["sample_rate_hz"]] = int(round(sample_rate))
+        focus = st.session_state.get("length_sync_focus", "duration")
+        if focus == "sample_len":
+            st.session_state[LENGTH_WIDGET_KEYS["duration"]] = sample_len / sample_rate
+        else:
+            st.session_state[LENGTH_WIDGET_KEYS["sample_len"]] = max(1, int(round(sample_rate * duration)))
+            st.session_state["length_sync_focus"] = "duration"
+
+
+def sync_sample_rate_display_to_unit() -> None:
+    sample_rate_hz = max(1.0, float(st.session_state.get(LENGTH_WIDGET_KEYS["sample_rate_hz"], 1_000_000)))
+    frequency_scale = _frequency_scale_from_session()
+    st.session_state[LENGTH_WIDGET_KEYS["sample_rate_display"]] = sample_rate_hz / frequency_scale
+
+
+def build_demo_preview_config(base_config: AppConfig) -> AppConfig:
+    demo_config = deepcopy(base_config)
+    demo_config.generators = ["Tone"]
+    demo_config.global_params.update(
+        {
+            "sample_rate": 44_100,
+            "center_frequency_hz": 66.6,
+            "duration": 1.0,
+            "sample_len": 44_100,
+            "seed": 666,
+        }
+    )
+    demo_config.dataset.total_samples = 1
+    return demo_config
+
+
+def ensure_lfm_chirp_override(config_obj: AppConfig) -> None:
+    sample_rate = int(config_obj.global_params.get("sample_rate", 1_000_000))
+    chirp = config_obj.generator_overrides.setdefault("LFM", {}).setdefault("chirp", {})
+    chirp.setdefault("sweep_hz", max(1_000, sample_rate // 4))
+
+
+seed_length_widget_state(config)
+
+
 def generate_paired_dataset_set(selected_preset: str, base_output_dir: Path) -> tuple[dict[str, int | str | bool], dict[str, int | str | bool], Path]:
     companion_preset, group_slug = DATASET_PRESET_PAIRS[selected_preset]
     group_root = base_output_dir / group_slug
@@ -349,6 +470,15 @@ def generate_paired_dataset_set(selected_preset: str, base_output_dir: Path) -> 
     primary_results = generate_dataset(build_config_for_dataset_preset(selected_preset, primary_root))
     companion_results = generate_dataset(build_config_for_dataset_preset(companion_preset, companion_root))
     return primary_results, companion_results, group_root
+
+
+def generate_official_family_set(family_name: str, base_output_dir: Path) -> tuple[list[tuple[str, dict[str, int | str | bool]]], Path]:
+    family_root = base_output_dir / OFFICIAL_DATASET_FAMILY_SLUGS[family_name]
+    results: list[tuple[str, dict[str, int | str | bool]]] = []
+    for preset_name in OFFICIAL_DATASET_FAMILIES[family_name]:
+        preset_root = family_root / preset_name.lower().replace(" ", "_")
+        results.append((preset_name, generate_dataset(build_config_for_dataset_preset(preset_name, preset_root))))
+    return results, family_root
 
 
 def render_remap_form(
@@ -433,6 +563,7 @@ with right:
 
     if st.button("Load macro", use_container_width=True) and selected_macro != "<none>":
         st.session_state.config = macro_manager.load(selected_macro)
+        seed_length_widget_state(st.session_state.config, force=True)
         st.rerun()
 
     save_name = st.text_input("Save macro as", value="new_macro.yaml")
@@ -450,6 +581,15 @@ with right:
         st.success("Runtime mode: TorchSig backend available for local HDF5 generation.")
     else:
         st.info("Runtime mode: TorchSig is unavailable, so HDF5 output will use the local h5py fallback.")
+    generation_scope = st.radio(
+        "Generation scope",
+        options=["Single split", "Paired official split", "Full official family"],
+        horizontal=True,
+    )
+    st.caption(
+        "Single split generates just the selected preset. Paired official split generates the selected split plus its companion. "
+        "Full official family generates every official split in the chosen Sig53 or Wideband family."
+    )
     current_dataset_preset = config.global_params.get("dataset_preset", "Custom")
     if current_dataset_preset not in DATASET_PRESETS:
         current_dataset_preset = "Custom"
@@ -457,6 +597,7 @@ with right:
         "Dataset preset",
         options=list(DATASET_PRESETS.keys()),
         index=list(DATASET_PRESETS.keys()).index(current_dataset_preset),
+        disabled=generation_scope == "Full official family",
     )
     if selected_dataset_preset != current_dataset_preset:
         apply_dataset_preset(selected_dataset_preset)
@@ -468,12 +609,49 @@ with right:
             f"samples `{preset['total_samples']}`, split mode `{preset['split_mode']}`."
         )
         st.caption("Preset fields are locked; switch back to Custom to edit them manually.")
+    selected_official_family = None
+    family_presets: list[str] = []
+    if generation_scope == "Full official family":
+        family_default = "Sig53 official set"
+        if selected_dataset_preset in OFFICIAL_DATASET_FAMILIES["Wideband Sig53 official set"]:
+            family_default = "Wideband Sig53 official set"
+        elif selected_dataset_preset in OFFICIAL_DATASET_FAMILIES["Sig53 official set"]:
+            family_default = "Sig53 official set"
+        selected_official_family = st.selectbox(
+            "Official family",
+            options=list(OFFICIAL_DATASET_FAMILIES.keys()),
+            index=list(OFFICIAL_DATASET_FAMILIES.keys()).index(family_default),
+        )
+        family_presets = OFFICIAL_DATASET_FAMILIES[selected_official_family]
+        family_preview_preset = family_presets[0]
+        if config.global_params.get("dataset_preset") != family_preview_preset:
+            apply_dataset_preset(family_preview_preset)
+        ensure_lfm_chirp_override(config)
+        if config.generators != list(TORCHSIG_CONCRETE_GENERATORS):
+            config.generators = list(TORCHSIG_CONCRETE_GENERATORS)
+        st.info(
+            "This will generate every split in the family below into sibling subdirectories and then package the whole family root as one download."
+        )
+        st.caption(
+            f"Full official family mode previews `{family_preview_preset}` in the UI, then overrides the dataset preset, output format, generator catalog, sample count, split mode, and seed fields below when you generate."
+        )
+        st.caption(
+            "The preview split fields are locked to the first split in the chosen family so the UI shows a concrete starting point before generation."
+        )
+        with st.expander("Show generated splits", expanded=True):
+            for preset_name in family_presets:
+                preset = DATASET_PRESETS[preset_name]
+                st.write(
+                    f"- {preset_name}: {preset['total_samples']} samples, "
+                    f"{preset['split_mode']}, seed {preset['seed']}"
+                )
+    preset_locked = selected_dataset_preset != "Custom" or generation_scope == "Full official family"
     output_format_label = st.radio(
         "Output format",
         options=["TorchSig-compatible HDF5", "NumPy split folders"],
         index=0 if config.dataset.output_format == "hdf5" else 1,
         horizontal=True,
-        disabled=selected_dataset_preset != "Custom",
+        disabled=preset_locked,
     )
     if selected_dataset_preset == "Custom":
         config.dataset.output_format = "hdf5" if output_format_label == "TorchSig-compatible HDF5" else "numpy"
@@ -488,7 +666,7 @@ with right:
         options=["Simplified families", "TorchSig concrete labels"],
         index=0 if generator_catalog_default == "Simplified families" else 1,
         horizontal=True,
-        disabled=selected_dataset_preset != "Custom",
+        disabled=preset_locked,
     )
     if selected_dataset_preset == "Custom":
         config.global_params["generator_catalog"] = generator_catalog
@@ -496,7 +674,7 @@ with right:
         "Total samples",
         min_value=1,
         value=config.dataset.total_samples,
-        disabled=selected_dataset_preset != "Custom",
+        disabled=preset_locked,
     )
     split_mode = st.radio(
         "Split mode",
@@ -506,11 +684,18 @@ with right:
         else 0,
         horizontal=True,
         help="Split mode controls whether NumPy output is split into train/val folders or written as a single train-only / val-only partition.",
-        disabled=selected_dataset_preset != "Custom",
+        disabled=preset_locked,
     )
     config.dataset.split_mode = split_mode
     if split_mode == "split":
-        train_ratio = st.slider("Train ratio", 0.1, 0.95, float(config.dataset.train_ratio), 0.05)
+        train_ratio = st.slider(
+            "Train ratio",
+            0.1,
+            0.95,
+            float(config.dataset.train_ratio),
+            0.05,
+            disabled=preset_locked,
+        )
     else:
         train_ratio = float(config.dataset.train_ratio)
         st.caption("Train ratio is ignored outside split mode.")
@@ -528,16 +713,10 @@ with right:
         )
         preset_seed = SEED_PRESETS[selected_seed_preset]
         if preset_seed is None:
-            seed = st.number_input(
-                "Seed",
-                value=int(current_seed) if current_seed is not None else 1234567890,
-                step=1,
-                help="Set this to make generation and previews repeatable.",
-            )
+            st.caption("Use the global seed control to set a custom value.")
         else:
-            seed = preset_seed
-            st.caption(f"Using preset seed `{seed}` from the original TorchSig settings.")
-        config.global_params["seed"] = int(seed)
+            config.global_params["seed"] = int(preset_seed)
+            st.caption(f"Using preset seed `{preset_seed}` from the original TorchSig settings.")
     else:
         seed = int(config.global_params.get("seed", 1234567890))
         st.caption(f"Using dataset preset seed `{seed}` from the original TorchSig settings.")
@@ -557,7 +736,17 @@ with left:
     generator_catalog = config.global_params.get("generator_catalog", "Simplified families")
     resolved_generators = []
     unknown_generators = []
-    if generator_catalog == "TorchSig concrete labels":
+    full_family_mode = generation_scope == "Full official family"
+    if full_family_mode:
+        selected_generators = list(TORCHSIG_CONCRETE_GENERATORS)
+        config.generators = selected_generators
+        st.info(
+            f"Full official family mode is using the full TorchSig concrete generator catalog ({len(config.generators)} generators)."
+        )
+        with st.expander("Selected generators", expanded=False):
+            st.write(", ".join(config.generators))
+        st.caption("The family preset controls generators in this mode.")
+    elif generator_catalog == "TorchSig concrete labels":
         for name in config.generators:
             if is_torchsig_concrete_generator(name):
                 if name not in resolved_generators:
@@ -630,6 +819,9 @@ with left:
             st.success("Applied generator remaps.")
 
     config.generators = selected_generators
+    if st.session_state.get("demo_preview_mode", False) and selected_generators != ["Tone"]:
+        st.session_state["demo_preview_mode"] = False
+        st.rerun()
 
     st.subheader("2) Global parameters")
     selected_generator_families = {resolve_generator_name(name) or name for name in config.generators}
@@ -647,18 +839,23 @@ with left:
         options=list(FREQUENCY_UNITS.keys()),
         index=list(FREQUENCY_UNITS.keys()).index(default_frequency_unit),
         key="frequency_unit",
+        on_change=sync_sample_rate_display_to_unit,
+        disabled=preset_locked,
     )
     frequency_scale = FREQUENCY_UNITS[frequency_unit]
     st.caption("Values are displayed in the selected unit but stored internally in Hz.")
-    sample_rate_display = current_sample_rate / frequency_scale
     sample_rate_display = st.number_input(
         f"Sample rate ({frequency_unit})",
         min_value=1_000 / frequency_scale,
-        value=float(sample_rate_display),
         step=max(0.001, 1_000.0 / frequency_scale),
         format="%.6f",
+        key=LENGTH_WIDGET_KEYS["sample_rate_display"],
+        on_change=sync_length_widget_state,
+        args=("sample_rate",),
+        disabled=preset_locked,
     )
-    sample_rate = int(sample_rate_display * frequency_scale)
+    sample_rate = int(round(float(st.session_state[LENGTH_WIDGET_KEYS["sample_rate_display"]]) * frequency_scale))
+    st.session_state[LENGTH_WIDGET_KEYS["sample_rate_hz"]] = sample_rate
 
     center_frequency_default = float(config.global_params.get("center_frequency_hz", 0))
     center_frequency_limit = sample_rate / 2.0
@@ -671,43 +868,75 @@ with left:
         value=float(center_frequency_display),
         step=max(0.001, max(1_000.0, sample_rate / 100.0) / frequency_scale),
         format="%.6f",
+        disabled=preset_locked,
     )
     center_frequency_hz = int(center_frequency_hz * frequency_scale)
     duration = st.number_input(
-        "Duration (sec)", min_value=0.000001, value=float(config.global_params.get("duration", 0.001)), format="%.6f"
+        "Duration (sec)",
+        min_value=0.000001,
+        format="%.6f",
+        key=LENGTH_WIDGET_KEYS["duration"],
+        on_change=sync_length_widget_state,
+        args=("duration",),
+        disabled=preset_locked,
     )
     snr_min, snr_max = st.slider(
         "SNR range (dB)",
         min_value=-20,
         max_value=60,
         value=tuple(config.global_params.get("snr_db", [0, 30])),
+        disabled=preset_locked,
     )
-    sample_len = st.number_input("Sample length", min_value=128, value=int(config.global_params.get("sample_len", 1024)), step=128)
+    sample_len = st.number_input(
+        "Sample length",
+        min_value=128,
+        step=1,
+        key=LENGTH_WIDGET_KEYS["sample_len"],
+        on_change=sync_length_widget_state,
+        args=("sample_len",),
+        disabled=preset_locked,
+    )
     seed_value = config.global_params.get("seed")
     seed = st.number_input(
         "Seed",
         value=int(seed_value) if seed_value is not None else 123456789,
         step=1,
         help="Set this to make generation and previews repeatable.",
+        key="global_seed",
+        disabled=preset_locked,
     )
 
     config.global_params.update(
         {
             "sample_rate": int(sample_rate),
             "center_frequency_hz": int(center_frequency_hz),
-            "duration": float(duration),
+            "duration": float(st.session_state[LENGTH_WIDGET_KEYS["duration"]]),
             "snr_db": [int(snr_min), int(snr_max)],
-            "sample_len": int(sample_len),
+            "sample_len": int(st.session_state[LENGTH_WIDGET_KEYS["sample_len"]]),
             "seed": int(seed),
         }
     )
 
     if "LFM" in selected_generator_families:
         st.info("LFM selected: chirp parameters are required.")
-        sweep_hz = st.number_input("LFM sweep bandwidth (Hz)", min_value=1_000, value=50_000)
-        config.generator_overrides.setdefault("LFM", {})["chirp"] = {"sweep_hz": int(sweep_hz)}
+        sweep_hz = st.number_input("LFM sweep bandwidth (Hz)", min_value=1_000, value=50_000, disabled=preset_locked)
+        if not preset_locked:
+            config.generator_overrides.setdefault("LFM", {})["chirp"] = {"sweep_hz": int(sweep_hz)}
 
     st.subheader("3) Transform pipeline")
+    st.caption(
+        "These transforms are post-generation augmentations, not TorchSig impairments. "
+        "They are previewed for every backend, but only applied to NumPy output when enabled."
+    )
+    apply_post_transforms = st.checkbox(
+        "Apply post-generation transforms to NumPy output",
+        value=bool(config.global_params.get("apply_post_transforms", config.dataset.output_format == "numpy")),
+        disabled=config.dataset.output_format != "numpy" or preset_locked and generation_scope == "Full official family",
+        help="When enabled, the supported post-generation transforms are applied to the NumPy fallback output only.",
+    )
+    config.global_params["apply_post_transforms"] = bool(apply_post_transforms)
+    if config.dataset.output_format != "numpy":
+        st.caption("TorchSig-compatible HDF5 generation does not apply the post-generation transform chain.")
     transform_options = sorted(TRANSFORM_REGISTRY.keys())
     resolved_transforms = []
     unknown_transforms = []
@@ -754,11 +983,29 @@ with left:
         st.success("Applied transform remaps.")
 
     st.subheader("4) Transform preview")
-    preview_transforms = [step.name for step in config.transforms if step.enabled and step.name in TRANSFORM_REGISTRY]
-    if preview_transforms:
-        preview_stages = build_transform_preview(config, preview_transforms)
+    demo_preview_mode = st.checkbox(
+        "Use demo preview tone",
+        value=bool(st.session_state.get("demo_preview_mode", True)),
+        help="When enabled, the preview is forced to a 66.6 Hz tone demo with a 44.1 kHz sample rate, 44,100 samples, 1.0 second duration, band center at 66.6 Hz, and seed 666.",
+        key="demo_preview_mode",
+    )
+    preview_config = config
+    if demo_preview_mode:
+        preview_config = build_demo_preview_config(config)
         st.caption(
-            "Approximate preview built from a synthetic sample. This uses the selected band center so the preview matches the exported RF placement."
+            "Demo preview mode is forcing Tone at 44.1 kHz, 66.6 Hz center frequency, 1.0 s duration, 44,100 samples, and seed 666."
+        )
+    preview_transforms = [step.name for step in config.transforms if step.enabled and step.name in TRANSFORM_REGISTRY]
+    if demo_preview_mode:
+        if "AWGN" not in preview_transforms:
+            preview_transforms = ["AWGN", *preview_transforms]
+        else:
+            preview_transforms = ["AWGN", *[name for name in preview_transforms if name != "AWGN"]]
+    if preview_transforms:
+        preview_stages = build_transform_preview(preview_config, preview_transforms)
+        st.caption(
+            "Approximate preview built from a clean tone, then the selected preview transforms, then a single spectrogram view that is zoomed to the active band. "
+            "Demo mode injects AWGN once so the tone remains visible in the preview."
         )
         with st.expander("Show preview", expanded=True):
             st.pyplot(render_preview_figure(preview_stages), clear_figure=True)
@@ -824,7 +1071,28 @@ paired_generate_disabled = (
     or bool(output_dir_error)
     or not confirm_non_empty_output
 )
-if selected_dataset_preset != "Custom":
+if generation_scope == "Full official family":
+    family_generate_disabled = bool(errors) or bool(output_dir_error) or not confirm_non_empty_output
+    if st.button("Generate full official family set", type="primary", disabled=family_generate_disabled):
+        base_root = sanitize_output_dir(config.dataset.output_dir)
+        family_results, family_root = generate_official_family_set(
+            selected_official_family or "Sig53 official set",
+            base_root,
+        )
+        st.session_state.download_zip = build_dataset_zip_bytes(family_root)
+        st.session_state.download_name = f"{family_root.name or 'official_family'}.zip"
+        st.success(
+            "Generated the full official family at "
+            f"{family_root} ({selected_official_family})."
+        )
+        hdf5_count = sum(1 for _, result in family_results if result["output_format"] == "hdf5")
+        if hdf5_count:
+            torchsig_count = sum(1 for _, result in family_results if result["torchsig_generated"])
+            if torchsig_count:
+                st.success(f"TorchSig generation backend was used for {torchsig_count} split(s).")
+            else:
+                st.info("TorchSig was unavailable, so the family used the local h5py fallback for HDF5 splits.")
+elif selected_dataset_preset != "Custom":
     paired_button_label = "Generate paired official train/val set"
     if st.button(paired_button_label, disabled=paired_generate_disabled, use_container_width=True):
         base_root = sanitize_output_dir(config.dataset.output_dir)
@@ -843,28 +1111,29 @@ if selected_dataset_preset != "Custom":
                 st.success("TorchSig generation backend was used for at least one split.")
             else:
                 st.info("TorchSig was unavailable for both splits, so h5py fallback files were written.")
-if st.button("Generate dataset", type="primary", disabled=generate_disabled):
-    results = generate_dataset(config)
-    st.session_state.download_zip = build_dataset_zip_bytes(results["output_dir"])
-    st.session_state.download_name = f"{Path(results['output_dir']).name or 'dataset'}.zip"
-    if results["output_format"] == "hdf5":
-        st.success(
-            "Generated TorchSig-compatible HDF5 dataset at "
-            f"{results['output_dir']} with {config.dataset.total_samples} samples "
-            f"({config.dataset.split_mode})."
-        )
-        if results["torchsig_generated"]:
-            st.success("TorchSig generation backend was used.")
-        else:
-            st.info(
-                "TorchSig was unavailable, so the app wrote a compatible data.h5 file with h5py instead."
-                f" Reason: {results['torchsig_error'] or 'unknown'}"
+else:
+    if st.button("Generate dataset", type="primary", disabled=generate_disabled):
+        results = generate_dataset(config)
+        st.session_state.download_zip = build_dataset_zip_bytes(results["output_dir"])
+        st.session_state.download_name = f"{Path(results['output_dir']).name or 'dataset'}.zip"
+        if results["output_format"] == "hdf5":
+            st.success(
+                "Generated TorchSig-compatible HDF5 dataset at "
+                f"{results['output_dir']} with {config.dataset.total_samples} samples "
+                f"({config.dataset.split_mode})."
             )
-    else:
-        st.success(
-            "Generated NumPy split-folder dataset at "
-            f"{results['output_dir']} (train={results['train_samples']}, val={results['val_samples']})."
-        )
+            if results["torchsig_generated"]:
+                st.success("TorchSig generation backend was used.")
+            else:
+                st.info(
+                    "TorchSig was unavailable, so the app wrote a compatible data.h5 file with h5py instead."
+                    f" Reason: {results['torchsig_error'] or 'unknown'}"
+                )
+        else:
+            st.success(
+                "Generated NumPy split-folder dataset at "
+                f"{results['output_dir']} (train={results['train_samples']}, val={results['val_samples']})."
+            )
 
 if st.session_state.download_zip:
     st.download_button(

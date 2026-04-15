@@ -12,9 +12,16 @@ _MPL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE_DIR))
 
 import matplotlib.pyplot as plt
-from scipy.signal import stft
 
 from sigsynth.models import AppConfig
+from sigsynth.post_transforms import (
+    apply_awgn,
+    apply_chirp_flatten,
+    apply_complex_to_real_magnitude,
+    apply_freq_offset,
+    apply_iq_imbalance,
+    apply_spectrogram,
+)
 from sigsynth.registry import resolve_generator_name
 
 
@@ -36,18 +43,15 @@ def _sample_rng(config: AppConfig) -> np.random.Generator:
 
 
 def _make_base_signal(config: AppConfig) -> np.ndarray:
-    rng = _sample_rng(config)
     sample_len = int(config.global_params.get("sample_len", 1024))
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
     center_frequency_hz = float(config.global_params.get("center_frequency_hz", 0.0))
     t = np.arange(sample_len, dtype=float) / sample_rate
     resolved_generators = {resolve_generator_name(name) or name for name in config.generators}
 
-    def _fm_demo_tone() -> np.ndarray:
+    def _demo_tone() -> np.ndarray:
         carrier_hz = 66.6
-        modulation = 8.0 * np.sin(2.0 * np.pi * 0.75 * t) + 2.5 * np.sin(2.0 * np.pi * 3.25 * t)
-        instantaneous_freq = carrier_hz + modulation
-        phase = 2.0 * np.pi * np.cumsum(instantaneous_freq) / sample_rate
+        phase = 2.0 * np.pi * carrier_hz * t
         return np.exp(1j * phase)
 
     if "LFM" in resolved_generators or "ChirpSS" in resolved_generators:
@@ -56,68 +60,34 @@ def _make_base_signal(config: AppConfig) -> np.ndarray:
         phase = 2 * np.pi * (0.5 * chirp_rate * t**2)
         base = np.exp(1j * phase)
     else:
-        base = _fm_demo_tone()
+        base = _demo_tone()
 
     base *= np.exp(1j * 2 * np.pi * center_frequency_hz * t)
-    base += 0.03 * (rng.standard_normal(sample_len) + 1j * rng.standard_normal(sample_len))
     return base.astype(np.complex64)
 
 
 def _apply_awgn(signal: np.ndarray, config: AppConfig) -> np.ndarray:
-    snr_db = config.global_params.get("snr_db", [0, 30])
-    if isinstance(snr_db, (list, tuple)) and len(snr_db) >= 2:
-        snr_mid = float(snr_db[0] + snr_db[1]) / 2.0
-    else:
-        snr_mid = 15.0
-    rng = _sample_rng(config)
-    power = np.mean(np.abs(signal) ** 2)
-    noise_power = power / (10 ** (snr_mid / 10))
-    noise = np.sqrt(noise_power / 2.0) * (rng.standard_normal(len(signal)) + 1j * rng.standard_normal(len(signal)))
-    return (signal + noise).astype(np.complex64)
+    return apply_awgn(signal, config)
 
 
 def _apply_freq_offset(signal: np.ndarray, config: AppConfig) -> np.ndarray:
-    sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
-    sample_len = len(signal)
-    offset_hz = min(max(sample_rate * 0.02, 1_000.0), sample_rate / 8.0)
-    t = np.arange(sample_len, dtype=float) / sample_rate
-    return (signal * np.exp(1j * 2 * np.pi * offset_hz * t)).astype(np.complex64)
+    return apply_freq_offset(signal, config)
 
 
 def _apply_iq_imbalance(signal: np.ndarray, config: AppConfig) -> np.ndarray:
-    rng = _sample_rng(config)
-    amplitude = 1.0 + rng.uniform(-0.15, 0.15)
-    phase = rng.uniform(-0.08, 0.08)
-    i = signal.real * amplitude
-    q = signal.imag * (2.0 - amplitude)
-    rotated_i = i * np.cos(phase) - q * np.sin(phase)
-    rotated_q = i * np.sin(phase) + q * np.cos(phase)
-    dc = 0.03 * np.exp(1j * rng.uniform(0.0, 2.0 * np.pi))
-    return (rotated_i + 1j * rotated_q + dc).astype(np.complex64)
+    return apply_iq_imbalance(signal, config)
 
 
 def _apply_chirp_flatten(signal: np.ndarray, config: AppConfig) -> np.ndarray:
-    sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
-    t = np.arange(len(signal), dtype=float) / sample_rate
-    flatten_rate = sample_rate * 0.02
-    return (signal * np.exp(-1j * 2 * np.pi * (0.5 * flatten_rate * t**2))).astype(np.complex64)
+    return apply_chirp_flatten(signal, config)
 
 
 def _apply_complex_to_real_magnitude(signal: np.ndarray) -> np.ndarray:
-    return np.abs(signal).astype(np.float32)
+    return apply_complex_to_real_magnitude(signal)
 
 
 def _apply_spectrogram(signal: np.ndarray, config: AppConfig) -> np.ndarray:
-    fft_size = int(config.global_params.get("sample_len", 1024))
-    fft_size = max(32, min(256, fft_size))
-    _, _, spec = stft(
-        signal,
-        nperseg=fft_size,
-        noverlap=fft_size // 2,
-        boundary=None,
-        return_onesided=False,
-    )
-    return np.abs(spec).astype(np.float32)
+    return apply_spectrogram(_upsample_for_spectrogram(signal), config)
 
 
 def apply_preview_transform(name: str, signal: np.ndarray, config: AppConfig) -> np.ndarray:
@@ -137,19 +107,44 @@ def apply_preview_transform(name: str, signal: np.ndarray, config: AppConfig) ->
 
 
 def build_transform_preview(config: AppConfig, transform_names: list[str], max_stages: int = 6) -> list[PreviewStage]:
-    stages = [PreviewStage(name="Input", data=_make_base_signal(config), kind="complex")]
-    current = stages[0].data
+    base = _make_base_signal(config)
+    stages = [PreviewStage(name="Clean Tone", data=base, kind="complex")]
+    current = base
 
-    for name in transform_names[: max_stages - 1]:
+    for name in transform_names[: max_stages - 2]:
         current = apply_preview_transform(name, current, config)
         kind = "spectrogram" if name == "Spectrogram" else ("real" if np.isrealobj(current) else "complex")
-        stages.append(PreviewStage(name=name, data=current, kind=kind))
+        label = f"After {name}" if name != "Spectrogram" else "Spectrogram"
+        stages.append(PreviewStage(name=label, data=current, kind=kind))
         if kind == "spectrogram":
             break
 
-    if stages[-1].name != "Final":
-        stages.append(PreviewStage(name="Final", data=current, kind="spectrogram" if current.ndim == 2 else ("real" if np.isrealobj(current) else "complex")))
+    if not any(name == "Spectrogram" for name in transform_names):
+        current = apply_spectrogram(_upsample_for_spectrogram(current), config)
+        stages.append(PreviewStage(name="Preview Spectrogram", data=current, kind="spectrogram"))
     return stages
+
+
+def _zoom_spectrogram(data: np.ndarray, target_fraction: float = 0.35) -> np.ndarray:
+    if data.ndim != 2 or data.shape[0] < 8:
+        return data
+
+    energy = np.mean(np.abs(data), axis=1)
+    center = int(np.argmax(energy))
+    half_span = max(16, int(data.shape[0] * target_fraction / 2.0))
+    start = max(0, center - half_span)
+    stop = min(data.shape[0], center + half_span)
+    if stop - start < 8:
+        start = max(0, center - 4)
+        stop = min(data.shape[0], center + 4)
+    return data[start:stop, :]
+
+
+def _upsample_for_spectrogram(signal: np.ndarray, target_len: int = 16384) -> np.ndarray:
+    if len(signal) >= target_len:
+        return signal
+    repeats = int(np.ceil(target_len / max(1, len(signal))))
+    return np.tile(signal, repeats)[:target_len]
 
 
 def render_preview_figure(stages: list[PreviewStage]):
@@ -161,7 +156,16 @@ def render_preview_figure(stages: list[PreviewStage]):
     for ax, stage in zip(axes, stages):
         data = stage.data
         if data.ndim == 2:
-            ax.imshow(data, aspect="auto", origin="lower", cmap="magma")
+            data = _zoom_spectrogram(data)
+            finite = np.isfinite(data)
+            if np.any(finite):
+                vmin = float(np.nanpercentile(data[finite], 5))
+                vmax = float(np.nanpercentile(data[finite], 95))
+            else:
+                vmin, vmax = -80.0, 0.0
+            if np.isclose(vmin, vmax):
+                vmin, vmax = vmin - 1.0, vmax + 1.0
+            ax.imshow(data, aspect="auto", origin="lower", cmap="magma", vmin=vmin, vmax=vmax)
             ax.set_ylabel("Bins")
         elif np.iscomplexobj(data):
             limit = min(len(data), 256)

@@ -111,6 +111,12 @@ GENERATOR_REGISTRY: dict[str, GeneratorMeta] = {
         requires=["baseband"],
         tags=["narrowband"],
     ),
+    "ASK": GeneratorMeta(
+        name="ASK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
     "QAM": GeneratorMeta(
         name="QAM",
         produces=["complex_iq"],
@@ -240,6 +246,58 @@ def resolve_generator_name(name: str) -> str | None:
     normalized = _normalize_registry_key(name)
     if normalized in GENERATOR_ALIASES:
         return GENERATOR_ALIASES[normalized]
+    concrete_map = {
+        "tone": "Tone",
+        "bpsk": "BPSK",
+        "qpsk": "QPSK",
+        "8psk": "8PSK",
+        "16qam": "QAM16",
+        "64qam": "QAM64",
+        "4ask": "ASK",
+        "8ask": "ASK",
+        "16ask": "ASK",
+        "32ask": "ASK",
+        "64ask": "ASK",
+        "2fsk": "FSK",
+        "4fsk": "FSK",
+        "8fsk": "FSK",
+        "16fsk": "FSK",
+        "2gfsk": "GFSK",
+        "4gfsk": "GFSK",
+        "8gfsk": "GFSK",
+        "16gfsk": "GFSK",
+        "2msk": "MSK",
+        "4msk": "MSK",
+        "8msk": "MSK",
+        "16msk": "MSK",
+        "2gmsk": "GMSK",
+        "4gmsk": "GMSK",
+        "8gmsk": "GMSK",
+        "16gmsk": "GMSK",
+        "fm": "FM",
+        "ook": "OOK",
+        "lfmdata": "LFM",
+        "lfmradar": "LFM",
+        "chirpss": "ChirpSS",
+        "amdsb": "AM",
+        "amdsbsc": "AM",
+        "amusb": "AM",
+        "amlsb": "AM",
+        "ofdm64": "OFDM",
+        "ofdm72": "OFDM",
+        "ofdm128": "OFDM",
+        "ofdm180": "OFDM",
+        "ofdm256": "OFDM",
+        "ofdm300": "OFDM",
+        "ofdm512": "OFDM",
+        "ofdm600": "OFDM",
+        "ofdm900": "OFDM",
+        "ofdm1024": "OFDM",
+        "ofdm1200": "OFDM",
+        "ofdm2048": "OFDM",
+    }
+    if normalized in concrete_map:
+        return concrete_map[normalized]
     if normalized.startswith("ofdm"):
         return "OFDM"
     if normalized.startswith("lfm"):
@@ -261,12 +319,10 @@ def resolve_generator_name(name: str) -> str | None:
     if normalized.endswith("fsk"):
         return "FSK"
     if normalized.endswith("psk"):
-        if normalized in {"bpsk", "qpsk", "8psk"}:
-            return GENERATOR_ALIASES.get(normalized)
         return "PSK"
+    if normalized.endswith("ask"):
+        return "ASK"
     if "qamcross" in normalized or normalized.endswith("qam"):
-        if normalized in {"qam16", "qam64"}:
-            return GENERATOR_ALIASES.get(normalized)
         return "QAM"
     if normalized == "tone":
         return "Tone"
@@ -290,6 +346,7 @@ def to_torchsig_generator_name(name: str) -> str | None:
         "QPSK": "qpsk",
         "8PSK": "8psk",
         "PSK": "8psk",
+        "ASK": "16ask",
         "QAM16": "16qam",
         "QAM64": "64qam",
         "QAM": "16qam",

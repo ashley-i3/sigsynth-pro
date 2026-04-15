@@ -11,6 +11,7 @@ from sigsynth.numpy_synth import synthesize_sample
 from sigsynth.models import AppConfig
 from sigsynth.hdf5_export import write_config_yaml, write_torchsig_compatible_hdf5
 from sigsynth.paths import sanitize_output_dir
+from sigsynth.post_transforms import NUMPY_POST_TRANSFORMS, apply_post_transform
 from sigsynth.registry import GENERATOR_REGISTRY
 from sigsynth.registry import resolve_generator_name
 from sigsynth.registry import to_torchsig_generator_name
@@ -151,6 +152,8 @@ def _split_counts(config: AppConfig) -> tuple[int, int, str]:
 
 def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
     train_count, val_count, split_mode = _split_counts(config)
+    apply_post_transforms = bool(config.global_params.get("apply_post_transforms", False))
+    post_transform_warnings: set[str] = set()
 
     layout = []
     if train_count > 0:
@@ -179,15 +182,30 @@ def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
             else:
                 sample_index = idx
             sample = synthesize_sample(config, sample_index)
+            impaired = sample.impaired
+            if apply_post_transforms:
+                for step in config.transforms:
+                    if not step.enabled:
+                        continue
+                    if step.name in NUMPY_POST_TRANSFORMS:
+                        impaired = apply_post_transform(step.name, impaired, config)
+                    elif step.name not in post_transform_warnings:
+                        post_transform_warnings.add(step.name)
 
             np.save(output_dir / split / "raw" / f"sample_{idx:06d}.npy", sample.clean)
-            np.save(output_dir / split / "impaired" / f"sample_{idx:06d}.npy", sample.impaired)
+            np.save(output_dir / split / "impaired" / f"sample_{idx:06d}.npy", impaired)
+
+    if post_transform_warnings:
+        config.global_params["post_transform_warnings"] = sorted(post_transform_warnings)
+    else:
+        config.global_params.pop("post_transform_warnings", None)
 
 
 def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:
     output_dir = sanitize_output_dir(config.dataset.output_dir)
     _reset_output_dir(output_dir)
 
+    config.global_params.pop("post_transform_warnings", None)
     train_count, val_count, _ = _split_counts(config)
     torchsig_generated = False
     torchsig_error = ""
@@ -208,6 +226,7 @@ def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:
         "val_samples": val_count,
         "torchsig_generated": torchsig_generated,
         "torchsig_error": torchsig_error or "",
+        "post_transform_warnings": config.global_params.get("post_transform_warnings", []),
     }
 
 

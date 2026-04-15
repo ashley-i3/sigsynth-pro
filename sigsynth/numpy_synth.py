@@ -185,6 +185,12 @@ def _constellation_for(generator: str) -> np.ndarray:
         constellation = [complex(i, q) for i in levels for q in levels]
         arr = np.asarray(constellation, dtype=np.complex64)
         return arr / np.sqrt(np.mean(np.abs(arr) ** 2))
+    if family in {"ASK"}:
+        order = _order_from_name(generator, 16)
+        levels = np.arange(1, order + 1, dtype=float)
+        levels = levels - np.mean(levels)
+        levels = levels / np.sqrt(np.mean(levels**2))
+        return levels.astype(np.complex64)
     if family in {"Tone", "AM", "FM", "OFDM", "ChirpSS", "LFM"}:
         return np.array([1.0], dtype=np.complex64)
     if family == "OOK":
@@ -203,7 +209,7 @@ def _symbol_rate_for(generator: str, sample_rate: int, rng: np.random.Generator)
         return max(8, sample_rate // 256)
     if family in {"QAM64", "QAM16", "QAM"}:
         return max(8, sample_rate // int(rng.integers(48, 96)))
-    if family in {"PSK", "FSK", "GFSK", "MSK", "GMSK", "AM", "FM", "OOK", "Tone"}:
+    if family in {"ASK", "PSK", "FSK", "GFSK", "MSK", "GMSK", "AM", "FM", "OOK", "Tone"}:
         return max(8, sample_rate // int(rng.integers(48, 128)))
     return max(8, sample_rate // int(rng.integers(64, 160)))
 
@@ -277,6 +283,19 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
             shaped = np.pad(shaped, (0, sample_len - len(shaped)), constant_values=shaped[-1] if len(shaped) else 0.0)
         envelope = shaped[:sample_len]
         return (envelope * np.exp(1j * 2.0 * np.pi * carrier_hz * t)).astype(np.complex64)
+
+    if family == "ASK":
+        t = np.arange(sample_len, dtype=float) / sample_rate
+        order = _order_from_name(generator, 16)
+        amplitudes = np.linspace(0.2, 1.2, order, dtype=np.float32)
+        amplitudes = amplitudes - np.mean(amplitudes)
+        amplitudes = amplitudes / (np.sqrt(np.mean(amplitudes**2)) + 1e-9)
+        symbol_indices = rng.integers(0, order, size=num_symbols)
+        envelope = np.repeat(amplitudes[symbol_indices], samples_per_symbol)
+        if len(envelope) < sample_len:
+            envelope = np.pad(envelope, (0, sample_len - len(envelope)), mode="edge")
+        carrier_hz = float(rng.uniform(-0.08, 0.08) * sample_rate)
+        return (envelope[:sample_len] * np.exp(1j * 2.0 * np.pi * carrier_hz * t)).astype(np.complex64)
 
     if family in {"FSK", "GFSK", "MSK", "GMSK"}:
         order = _order_from_name(generator, 4)

@@ -249,6 +249,10 @@ When loading macros:
   * `train_only`
   * `val_only`
 * One-click paired generation for matching train/val official presets
+* Generation scope selector:
+  * `Single split`
+  * `Paired official split`
+  * `Full official family`
 * Output format selector:
   * TorchSig-compatible HDF5
   * NumPy split folders
