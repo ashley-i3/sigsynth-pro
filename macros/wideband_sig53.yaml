@@ -1,0 +1,24 @@
+schema_version: "1.0"
+generators:
+  - OFDM
+  - LFM
+  - QPSK
+  - QAM16
+global_params:
+  sample_rate: 10000000
+  duration: 0.0005
+  snr_db: [-5, 25]
+  sample_len: 4096
+generator_overrides:
+  LFM:
+    chirp:
+      sweep_hz: 1500000
+transforms:
+  - name: AWGN
+    enabled: true
+  - name: FreqOffset
+    enabled: true
+dataset:
+  total_samples: 5300
+  train_ratio: 0.8
+  output_dir: output/wideband_sig53
