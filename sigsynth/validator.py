@@ -66,5 +66,13 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
         errors.append("Total samples must be >= 2.")
     if not 0.0 < config.dataset.train_ratio < 1.0:
         errors.append("Train ratio must be between 0 and 1.")
+    else:
+        train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
+        val_count = config.dataset.total_samples - train_count
+        if train_count == 0 or val_count == 0:
+            warnings.append(
+                "Train/validation split produces a zero-sized partition "
+                f"(train={train_count}, val={val_count})."
+            )
 
     return errors, warnings

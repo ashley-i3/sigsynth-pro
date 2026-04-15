@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import yaml
 
@@ -22,7 +23,23 @@ class MacroManager:
         return AppConfig.from_dict(payload)
 
     def save(self, macro_name: str, config: AppConfig) -> Path:
-        path = self.macro_dir / macro_name
+        safe_name = self._sanitize_macro_name(macro_name)
+        path = self.macro_dir / safe_name
         with path.open("w", encoding="utf-8") as fp:
             yaml.safe_dump(config.to_dict(), fp, sort_keys=False)
         return path
+
+    @staticmethod
+    def _sanitize_macro_name(macro_name: str) -> str:
+        candidate = Path(macro_name)
+        if candidate.is_absolute():
+            raise ValueError("Absolute paths are not allowed for macro names.")
+        if ".." in candidate.parts:
+            raise ValueError("Parent directory traversal is not allowed for macro names.")
+
+        normalized = candidate.name
+        if not normalized:
+            raise ValueError("Macro name cannot be empty.")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", normalized):
+            raise ValueError("Macro name contains unsupported characters.")
+        return normalized

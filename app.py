@@ -39,10 +39,12 @@ with right:
 
     save_name = st.text_input("Save macro as", value="new_macro.yaml")
     if st.button("Save current macro", use_container_width=True):
-        if not save_name.endswith(".yaml"):
-            save_name += ".yaml"
-        path = macro_manager.save(save_name, config)
-        st.success(f"Saved {path}")
+        candidate_name = save_name if save_name.endswith(".yaml") else f"{save_name}.yaml"
+        try:
+            path = macro_manager.save(candidate_name, config)
+            st.success(f"Saved {path}")
+        except ValueError as exc:
+            st.error(str(exc))
 
     st.markdown("---")
     st.subheader("Dataset")
@@ -98,6 +100,11 @@ with left:
     config.transforms = [TransformStep(name=name, enabled=True) for name in enabled_transforms]
 
 errors, warnings = validate_config(config)
+train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
+val_count = config.dataset.total_samples - train_count
+split_has_zero_partition = train_count == 0 or val_count == 0
+output_path = Path(config.dataset.output_dir)
+output_dir_non_empty = output_path.exists() and output_path.is_dir() and any(output_path.iterdir())
 
 st.subheader("Validation")
 if warnings:
@@ -109,7 +116,25 @@ if errors:
 else:
     st.success("Configuration is valid.")
 
-if st.button("Generate dataset", type="primary", disabled=bool(errors)):
+confirm_non_empty_output = True
+if output_dir_non_empty:
+    st.warning(
+        "Output directory is not empty. Files that are not overwritten can taint your dataset unexpectedly."
+    )
+    confirm_non_empty_output = st.checkbox(
+        "I understand and want to generate into this non-empty directory.",
+        value=False,
+    )
+
+confirm_zero_split = True
+if split_has_zero_partition:
+    confirm_zero_split = st.checkbox(
+        f"I understand the split creates a zero-sized partition (train={train_count}, val={val_count}) and want to continue.",
+        value=False,
+    )
+
+generate_disabled = bool(errors) or not confirm_non_empty_output or not confirm_zero_split
+if st.button("Generate dataset", type="primary", disabled=generate_disabled):
     results = generate_dataset(config)
     st.success(
         "Generated dataset at "
