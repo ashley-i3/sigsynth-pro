@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from sigsynth.models import GeneratorMeta, TransformMeta
 
 
@@ -86,3 +88,31 @@ TRANSFORM_REGISTRY: dict[str, TransformMeta] = {
         constraints={"incompatible_with": ["chirp_preserving"]},
     ),
 }
+
+
+def _normalize_registry_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+GENERATOR_ALIASES: dict[str, str] = {
+    _normalize_registry_key(name): name for name in GENERATOR_REGISTRY
+}
+
+
+TRANSFORM_ALIASES: dict[str, str] = {
+    _normalize_registry_key(name): name for name in TRANSFORM_REGISTRY
+}
+
+
+def resolve_generator_name(name: str) -> str | None:
+    """Resolve a generator name using case-insensitive and punctuation-insensitive matching."""
+    if name in GENERATOR_REGISTRY:
+        return name
+    return GENERATOR_ALIASES.get(_normalize_registry_key(name))
+
+
+def resolve_transform_name(name: str) -> str | None:
+    """Resolve a transform name using case-insensitive and punctuation-insensitive matching."""
+    if name in TRANSFORM_REGISTRY:
+        return name
+    return TRANSFORM_ALIASES.get(_normalize_registry_key(name))

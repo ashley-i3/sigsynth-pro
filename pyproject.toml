@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigsynth"
+version = "0.1.0"
+description = "TorchSig dataset builder and macro UI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "scipy",
+    "streamlit",
+    "torch",
+    "tqdm",
+    "torchsig",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["sigsynth*"]
+
+[tool.uv.sources]
+torchsig = { git = "https://github.com/TorchDSP/torchsig.git", tag = "v2.1.0" }

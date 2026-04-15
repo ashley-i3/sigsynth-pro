@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from sigsynth.models import AppConfig
-from sigsynth.registry import GENERATOR_REGISTRY, TRANSFORM_REGISTRY
+from sigsynth.registry import (
+    GENERATOR_REGISTRY,
+    TRANSFORM_REGISTRY,
+    resolve_generator_name,
+    resolve_transform_name,
+)
 
 
 REQUIRED_GLOBALS = {"sample_rate", "duration", "snr_db"}
@@ -19,7 +24,8 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
         errors.append(f"Missing required global parameters: {', '.join(sorted(missing_globals))}")
 
     for generator_name in config.generators:
-        meta = GENERATOR_REGISTRY.get(generator_name)
+        canonical_generator_name = resolve_generator_name(generator_name) or generator_name
+        meta = GENERATOR_REGISTRY.get(canonical_generator_name)
         if not meta:
             errors.append(f"Generator '{generator_name}' is not registered.")
             continue
@@ -32,18 +38,22 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
     if config.generators and enabled_transforms:
         current_types = set()
         for name in config.generators:
-            generator = GENERATOR_REGISTRY.get(name)
+            canonical_generator_name = resolve_generator_name(name) or name
+            generator = GENERATOR_REGISTRY.get(canonical_generator_name)
             if generator:
                 current_types.update(generator.produces)
 
         generator_tags = {
             tag
             for name in config.generators
-            for tag in GENERATOR_REGISTRY.get(name, GENERATOR_REGISTRY["BPSK"]).tags
+            for tag in GENERATOR_REGISTRY.get(
+                resolve_generator_name(name) or name, GENERATOR_REGISTRY["BPSK"]
+            ).tags
         }
 
         for step in enabled_transforms:
-            transform = TRANSFORM_REGISTRY.get(step.name)
+            canonical_transform_name = resolve_transform_name(step.name) or step.name
+            transform = TRANSFORM_REGISTRY.get(canonical_transform_name)
             if not transform:
                 errors.append(f"Transform '{step.name}' is not registered.")
                 continue

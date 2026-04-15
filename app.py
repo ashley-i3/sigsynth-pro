@@ -4,10 +4,16 @@ from pathlib import Path
 
 import streamlit as st
 
-from sigsynth.generator import generate_dataset
+from sigsynth.generator import build_dataset_zip_bytes, generate_dataset
 from sigsynth.macro_manager import MacroManager
 from sigsynth.models import AppConfig, DatasetConfig, TransformStep
-from sigsynth.registry import GENERATOR_REGISTRY, TRANSFORM_REGISTRY
+from sigsynth.paths import sanitize_output_dir
+from sigsynth.registry import (
+    GENERATOR_REGISTRY,
+    TRANSFORM_REGISTRY,
+    resolve_generator_name,
+    resolve_transform_name,
+)
 from sigsynth.validator import validate_config
 
 st.set_page_config(page_title="TorchSig Dataset Builder", layout="wide")
@@ -23,8 +29,50 @@ if "config" not in st.session_state:
         transforms=[TransformStep(name="AWGN", enabled=True)],
         dataset=DatasetConfig(total_samples=100, train_ratio=0.8, output_dir="output/dataset"),
     )
+if "download_zip" not in st.session_state:
+    st.session_state.download_zip = None
+if "download_name" not in st.session_state:
+    st.session_state.download_name = "dataset.zip"
 
 config: AppConfig = st.session_state.config
+
+
+def render_remap_form(
+    form_key: str,
+    legacy_names: list[str],
+    options: list[str],
+    labels: dict[str, str],
+    suggestion_map: dict[str, str | None],
+) -> tuple[dict[str, str], bool]:
+    remaps: dict[str, str] = {}
+    if not legacy_names:
+        return remaps, False
+
+    suggestion_button_key = f"{form_key}::use_suggestions"
+    with st.form(form_key):
+        st.caption("Pick replacements for unresolved names to migrate older macros.")
+        for index, legacy_name in enumerate(legacy_names):
+            suggested = suggestion_map.get(legacy_name)
+            default_index = 0
+            if suggested in options:
+                default_index = options.index(suggested) + 1
+            remaps[legacy_name] = st.selectbox(
+                labels.get(legacy_name, legacy_name),
+                options=["<keep unresolved>"] + options,
+                index=default_index,
+                key=f"{form_key}::{index}::{legacy_name}",
+            )
+        submitted = st.form_submit_button("Apply remaps")
+
+    if st.button("Use suggestions for all", key=suggestion_button_key, use_container_width=True):
+        for index, legacy_name in enumerate(legacy_names):
+            suggested = suggestion_map.get(legacy_name)
+            target_value = suggested if suggested in options else "<keep unresolved>"
+            st.session_state[f"{form_key}::{index}::{legacy_name}"] = target_value
+        st.rerun()
+
+    return remaps, submitted
+
 
 left, right = st.columns([2, 1])
 
@@ -55,12 +103,48 @@ with right:
 
 with left:
     st.subheader("1) Generators")
+    generator_options = sorted(GENERATOR_REGISTRY.keys())
+    resolved_generators = []
+    unknown_generators = []
+    for name in config.generators:
+        canonical_name = resolve_generator_name(name)
+        if canonical_name:
+            if canonical_name not in resolved_generators:
+                resolved_generators.append(canonical_name)
+        else:
+            unknown_generators.append(name)
+
+    if unknown_generators:
+        st.warning(
+            "Macro contains legacy or unknown generator names that need attention: "
+            f"{', '.join(unknown_generators)}"
+        )
     selected_generators = st.multiselect(
         "Choose signal generators",
-        options=sorted(GENERATOR_REGISTRY.keys()),
-        default=config.generators,
+        options=generator_options,
+        default=resolved_generators,
     )
-    config.generators = selected_generators
+    generator_suggestions = {
+        name: resolve_generator_name(name)
+        for name in unknown_generators
+    }
+    generator_remaps, generator_remaps_applied = render_remap_form(
+        form_key="generator_remap_form",
+        legacy_names=unknown_generators,
+        options=generator_options,
+        labels={name: f"Replace '{name}' with" for name in unknown_generators},
+        suggestion_map=generator_suggestions,
+    )
+    remapped_generators = list(selected_generators)
+    for legacy_name, replacement in generator_remaps.items():
+        if replacement != "<keep unresolved>" and replacement not in remapped_generators:
+            remapped_generators.append(replacement)
+        elif replacement == "<keep unresolved>":
+            remapped_generators.append(legacy_name)
+
+    config.generators = remapped_generators
+    if generator_remaps_applied and unknown_generators:
+        st.success("Applied generator remaps.")
 
     st.subheader("2) Global parameters")
     sample_rate = st.number_input(
@@ -92,19 +176,65 @@ with left:
         config.generator_overrides.setdefault("LFM", {})["chirp"] = {"sweep_hz": int(sweep_hz)}
 
     st.subheader("3) Transform pipeline")
+    transform_options = sorted(TRANSFORM_REGISTRY.keys())
+    resolved_transforms = []
+    unknown_transforms = []
+    for step in config.transforms:
+        if not step.enabled:
+            continue
+        canonical_name = resolve_transform_name(step.name)
+        if canonical_name:
+            if canonical_name not in resolved_transforms:
+                resolved_transforms.append(canonical_name)
+        else:
+            unknown_transforms.append(step.name)
+
+    if unknown_transforms:
+        st.warning(
+            "Macro contains legacy or unknown transform names that need attention: "
+            f"{', '.join(unknown_transforms)}"
+        )
     enabled_transforms = st.multiselect(
         "Enable transforms in order",
-        options=sorted(TRANSFORM_REGISTRY.keys()),
-        default=[step.name for step in config.transforms if step.enabled],
+        options=transform_options,
+        default=resolved_transforms,
     )
-    config.transforms = [TransformStep(name=name, enabled=True) for name in enabled_transforms]
+    transform_suggestions = {
+        name: resolve_transform_name(name)
+        for name in unknown_transforms
+    }
+    transform_remaps, transform_remaps_applied = render_remap_form(
+        form_key="transform_remap_form",
+        legacy_names=unknown_transforms,
+        options=transform_options,
+        labels={name: f"Replace transform '{name}' with" for name in unknown_transforms},
+        suggestion_map=transform_suggestions,
+    )
+    remapped_transforms = list(enabled_transforms)
+    for legacy_name, replacement in transform_remaps.items():
+        if replacement != "<keep unresolved>" and replacement not in remapped_transforms:
+            remapped_transforms.append(replacement)
+        elif replacement == "<keep unresolved>":
+            remapped_transforms.append(legacy_name)
+
+    config.transforms = [TransformStep(name=name, enabled=True) for name in remapped_transforms]
+    if transform_remaps_applied and unknown_transforms:
+        st.success("Applied transform remaps.")
+
+output_dir_error = None
+safe_output_dir = None
+try:
+    safe_output_dir = sanitize_output_dir(config.dataset.output_dir)
+except ValueError as exc:
+    output_dir_error = str(exc)
 
 errors, warnings = validate_config(config)
 train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
 val_count = config.dataset.total_samples - train_count
 split_has_zero_partition = train_count == 0 or val_count == 0
-output_path = Path(config.dataset.output_dir)
-output_dir_non_empty = output_path.exists() and output_path.is_dir() and any(output_path.iterdir())
+output_dir_non_empty = False
+if safe_output_dir is not None:
+    output_dir_non_empty = safe_output_dir.exists() and safe_output_dir.is_dir() and any(safe_output_dir.iterdir())
 
 st.subheader("Validation")
 if warnings:
@@ -113,7 +243,9 @@ if warnings:
 if errors:
     for item in errors:
         st.error(item)
-else:
+if output_dir_error:
+    st.error(output_dir_error)
+if not errors and not output_dir_error:
     st.success("Configuration is valid.")
 
 confirm_non_empty_output = True
@@ -133,15 +265,31 @@ if split_has_zero_partition:
         value=False,
     )
 
-generate_disabled = bool(errors) or not confirm_non_empty_output or not confirm_zero_split
+generate_disabled = bool(errors) or bool(output_dir_error) or not confirm_non_empty_output or not confirm_zero_split
 if st.button("Generate dataset", type="primary", disabled=generate_disabled):
     results = generate_dataset(config)
+    st.session_state.download_zip = build_dataset_zip_bytes(results["output_dir"])
+    st.session_state.download_name = f"{Path(results['output_dir']).name or 'dataset'}.zip"
     st.success(
         "Generated dataset at "
         f"{results['output_dir']} (train={results['train_samples']}, val={results['val_samples']})."
     )
-    if not results["torchsig_available"]:
-        st.info("TorchSig import not available in this environment; synthetic NumPy placeholder generation was used.")
+    if results["torchsig_generated"]:
+        st.success("TorchSig generation backend was used.")
+    else:
+        st.info(
+            "TorchSig generation backend was not used in this environment; synthetic NumPy placeholder generation was used "
+            f"instead. Reason: {results['torchsig_error'] or 'unknown'}"
+        )
+
+if st.session_state.download_zip:
+    st.download_button(
+        "Download generated dataset (.zip)",
+        data=st.session_state.download_zip,
+        file_name=st.session_state.download_name,
+        mime="application/zip",
+        use_container_width=True,
+    )
 
 st.markdown("---")
 st.subheader("Current Config Snapshot")

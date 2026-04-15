@@ -418,7 +418,20 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### Run locally with uv (preferred)
+
+```bash
+# initialize torchsig submodule (once after clone)
+git submodule update --init --recursive
+
+# create/update environment with local torchsig path source
+uv sync
+uv run streamlit run app.py
+```
+
 ### Notes
 
-- The generator currently emits NumPy placeholder IQ files and checks whether `torchsig` is importable.
-- This gives us an executable harness to test UI workflow, validation, macros, and output layout while we integrate exact TorchSig dataset classes next.
+- The app now attempts TorchSig-native generation first by combining `TorchSigDefaults().default_dataset_metadata`, `TorchSigIterableDataset`, and `DatasetCreator`, then falls back to NumPy placeholder IQ generation when the TorchSig backend is unavailable or incompatible.
+- Legacy or unknown generator and transform names stay visible in the UI so they can be remapped instead of silently disappearing from loaded macros.
+- Generated datasets are sandboxed under `output/`, and macro files are constrained to the `macros/` directory.
+- After generation, the app provides a dataset ZIP download button so hosted Streamlit deployments can export generated artifacts.
