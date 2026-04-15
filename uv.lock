@@ -3171,6 +3171,7 @@ wheels = [
 
 [[package]]
 name = "torchsig"
+version = "2.1.0"
 source = { directory = "third_party/torchsig" }
 dependencies = [
     { name = "h5py" },

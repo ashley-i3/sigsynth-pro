@@ -442,6 +442,7 @@ Use the base app install only.
 - Do not enable `torchsig-local` in the cloud deployment.
 - Do not rely on the `third_party/torchsig` submodule being built in Streamlit Cloud.
 - The app will run with the NumPy or local `h5py` HDF5 fallback there.
+- `uv.lock` is generated from `pyproject.toml` and the vendored TorchSig metadata, so manual edits to the lockfile can be overwritten the next time the lock is refreshed.
 
 ### Notes
 
