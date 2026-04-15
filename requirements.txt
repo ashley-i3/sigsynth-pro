@@ -1,0 +1,26 @@
+# Core numerical + ML
+numpy
+scipy
+torch
+
+# TorchSig (install via pip or GitHub)
+torchsig
+
+# Config + serialization
+pyyaml
+
+# GUI (pick one, see below)
+# Option A: simple + fast
+streamlit
+
+# Option B: more control (desktop app)
+# PyQt6
+
+# Data handling
+pandas
+
+# Visualization (for previews later)
+matplotlib
+
+# Utility
+tqdm
