@@ -1,0 +1,24 @@
+schema_version: "1.0"
+generators:
+  - BPSK
+  - QPSK
+  - 8PSK
+  - QAM16
+  - QAM64
+global_params:
+  sample_rate: 1000000
+  duration: 0.001
+  snr_db: [0, 30]
+  sample_len: 1024
+generator_overrides: {}
+transforms:
+  - name: AWGN
+    enabled: true
+  - name: FreqOffset
+    enabled: true
+  - name: IQImbalance
+    enabled: true
+dataset:
+  total_samples: 5300
+  train_ratio: 0.8
+  output_dir: output/sig53
