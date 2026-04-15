@@ -147,15 +147,43 @@ def _upsample_for_spectrogram(signal: np.ndarray, target_len: int = 16384) -> np
     return np.tile(signal, repeats)[:target_len]
 
 
-def render_preview_figure(stages: list[PreviewStage]):
+def _format_frequency_axis(freq_hz: float) -> tuple[float, str]:
+    """Convert frequency to appropriate unit and return (value, unit)."""
+    if abs(freq_hz) >= 1e9:
+        return freq_hz / 1e9, "GHz"
+    elif abs(freq_hz) >= 1e6:
+        return freq_hz / 1e6, "MHz"
+    elif abs(freq_hz) >= 1e3:
+        return freq_hz / 1e3, "kHz"
+    else:
+        return freq_hz, "Hz"
+
+
+def _format_time_axis(time_s: float) -> tuple[float, str]:
+    """Convert time to appropriate unit and return (value, unit)."""
+    if time_s >= 1.0:
+        return time_s, "s"
+    elif time_s >= 1e-3:
+        return time_s * 1e3, "ms"
+    elif time_s >= 1e-6:
+        return time_s * 1e6, "μs"
+    else:
+        return time_s * 1e9, "ns"
+
+
+def render_preview_figure(stages: list[PreviewStage], config: AppConfig):
     rows = len(stages)
     fig, axes = plt.subplots(rows, 1, figsize=(10, max(2.5, 2.2 * rows)), constrained_layout=True)
     if rows == 1:
         axes = [axes]
 
+    sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
+    sample_len = int(config.global_params.get("sample_len", 1024))
+
     for ax, stage in zip(axes, stages):
         data = stage.data
         if data.ndim == 2:
+            # Spectrogram: frequency on y-axis, time on x-axis
             data = _zoom_spectrogram(data)
             finite = np.isfinite(data)
             if np.any(finite):
@@ -166,20 +194,70 @@ def render_preview_figure(stages: list[PreviewStage]):
             if np.isclose(vmin, vmax):
                 vmin, vmax = vmin - 1.0, vmax + 1.0
             ax.imshow(data, aspect="auto", origin="lower", cmap="magma", vmin=vmin, vmax=vmax)
-            ax.set_ylabel("Bins")
+
+            # Convert y-axis (frequency bins) to actual frequencies
+            freq_bins = data.shape[0]
+            nyquist = sample_rate / 2.0
+            freq_range = np.linspace(-nyquist, nyquist, freq_bins)
+            _, freq_unit = _format_frequency_axis(nyquist)
+            freq_scale = 1e9 if freq_unit == "GHz" else 1e6 if freq_unit == "MHz" else 1e3 if freq_unit == "kHz" else 1.0
+
+            # Set y-axis ticks and labels (both at once to avoid warning)
+            y_tick_positions = ax.get_yticks()
+            y_labels = []
+            valid_ticks = []
+            for tick in y_tick_positions:
+                if 0 <= tick < freq_bins:
+                    valid_ticks.append(tick)
+                    freq_hz = freq_range[int(tick)]
+                    y_labels.append(f"{freq_hz / freq_scale:.1f}")
+            if valid_ticks:
+                ax.set_yticks(valid_ticks, y_labels)
+            ax.set_ylabel(f"Frequency ({freq_unit})")
+
+            # Convert x-axis (time bins) to actual time
+            time_bins = data.shape[1]
+            duration_s = sample_len / sample_rate
+            _, time_unit = _format_time_axis(duration_s)
+            time_scale = 1.0 if time_unit == "s" else 1e-3 if time_unit == "ms" else 1e-6 if time_unit == "μs" else 1e-9
+            ax.set_xlabel(f"Time ({time_unit})")
+
+            # Set x-axis ticks and labels (both at once to avoid warning)
+            x_tick_positions = ax.get_xticks()
+            x_labels = []
+            valid_ticks = []
+            for tick in x_tick_positions:
+                if 0 <= tick < time_bins:
+                    valid_ticks.append(tick)
+                    time_s = (tick / time_bins) * duration_s
+                    x_labels.append(f"{time_s / time_scale:.1f}")
+            if valid_ticks:
+                ax.set_xticks(valid_ticks, x_labels)
+
         elif np.iscomplexobj(data):
+            # Time-domain IQ plot
             limit = min(len(data), 256)
-            x = np.arange(limit)
-            ax.plot(x, data.real[:limit], label="real", linewidth=1.0)
-            ax.plot(x, data.imag[:limit], label="imag", linewidth=1.0, alpha=0.8)
+            time_s = np.arange(limit) / sample_rate
+            time_val, time_unit = _format_time_axis(time_s[-1] if len(time_s) > 0 else 1e-6)
+            time_scale = 1.0 if time_unit == "s" else 1e-3 if time_unit == "ms" else 1e-6 if time_unit == "μs" else 1e-9
+            time_axis = time_s / time_scale
+
+            ax.plot(time_axis, data.real[:limit], label="real", linewidth=1.0)
+            ax.plot(time_axis, data.imag[:limit], label="imag", linewidth=1.0, alpha=0.8)
             ax.set_ylabel("Amplitude")
+            ax.set_xlabel(f"Time ({time_unit})")
             ax.legend(loc="upper right", fontsize="small")
         else:
+            # Real time-domain plot
             limit = min(len(data), 256)
-            x = np.arange(limit)
-            ax.plot(x, data[:limit], color="#2b6cb0", linewidth=1.0)
+            time_s = np.arange(limit) / sample_rate
+            time_val, time_unit = _format_time_axis(time_s[-1] if len(time_s) > 0 else 1e-6)
+            time_scale = 1.0 if time_unit == "s" else 1e-3 if time_unit == "ms" else 1e-6 if time_unit == "μs" else 1e-9
+            time_axis = time_s / time_scale
+
+            ax.plot(time_axis, data[:limit], color="#2b6cb0", linewidth=1.0)
             ax.set_ylabel("Amplitude")
+            ax.set_xlabel(f"Time ({time_unit})")
         ax.set_title(stage.name)
-        ax.set_xlabel("Sample" if data.ndim == 1 else "Time bin")
 
     return fig
