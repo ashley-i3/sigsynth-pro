@@ -35,6 +35,7 @@ class DatasetConfig:
     train_ratio: float = 0.8
     output_dir: str = "output/dataset"
     output_format: str = "hdf5"
+    split_mode: str = "split"
 
 
 @dataclass

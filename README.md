@@ -243,6 +243,12 @@ When loading macros:
 ### 7.1 User Inputs
 
 * Total sample count
+* Dataset preset selector for the canonical TorchSig split variants
+* Split mode selector:
+  * `split`
+  * `train_only`
+  * `val_only`
+* One-click paired generation for matching train/val official presets
 * Output format selector:
   * TorchSig-compatible HDF5
   * NumPy split folders
@@ -264,6 +270,8 @@ dataset/
 │   ├── raw/
 │   └── impaired/
 ```
+
+* `train_only` and `val_only` modes write only the selected partition, which is how the app mirrors the official per-split TorchSig dataset configs.
 
 ---
 
@@ -304,14 +312,14 @@ dataset/
 
 ### 8.3 Default Macro
 
-#### Sig53 Replica
+#### Sig53 / Wideband Replicas
 
-* Matches TorchSig Sig53 dataset:
+* Matches the canonical TorchSig split presets from `references/conf.py`:
 
-  * Concrete TorchSig generator roster
-  * Uniform class distribution across the full class list
-  * Wideband multi-signal recipe via `num_signals_min=3` and `num_signals_max=5`
-  * Parameter distributions and transform pipeline aligned with the current TorchSig 2.1-style metadata syntax
+  * Separate clean and impaired train/val variants
+  * Canonical seeds for each split
+  * Official sample counts for Sig53 and Wideband Sig53
+  * Preset-driven dataset geometry and split mode
   * Dataset structure and metadata written alongside the exported data
 
 ---

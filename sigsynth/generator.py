@@ -135,22 +135,49 @@ def _reset_output_dir(output_dir: Path) -> None:
             child.unlink()
 
 
-def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
-    train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
-    val_count = config.dataset.total_samples - train_count
+def _split_counts(config: AppConfig) -> tuple[int, int, str]:
+    split_mode = str(config.dataset.split_mode or "split").lower()
+    total_samples = int(config.dataset.total_samples)
 
-    layout = [
-        output_dir / "train" / "raw",
-        output_dir / "train" / "impaired",
-        output_dir / "val" / "raw",
-        output_dir / "val" / "impaired",
-    ]
+    if split_mode == "train_only":
+        return total_samples, 0, split_mode
+    if split_mode == "val_only":
+        return 0, total_samples, split_mode
+
+    train_count = int(total_samples * config.dataset.train_ratio)
+    val_count = total_samples - train_count
+    return train_count, val_count, "split"
+
+
+def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
+    train_count, val_count, split_mode = _split_counts(config)
+
+    layout = []
+    if train_count > 0:
+        layout.extend(
+            [
+                output_dir / "train" / "raw",
+                output_dir / "train" / "impaired",
+            ]
+        )
+    if val_count > 0:
+        layout.extend(
+            [
+                output_dir / "val" / "raw",
+                output_dir / "val" / "impaired",
+            ]
+        )
     for folder in layout:
         folder.mkdir(parents=True, exist_ok=True)
 
     for split, count in (("train", train_count), ("val", val_count)):
+        if count <= 0:
+            continue
         for idx in range(count):
-            sample_index = idx if split == "train" else train_count + idx
+            if split_mode == "split" and split == "val":
+                sample_index = train_count + idx
+            else:
+                sample_index = idx
             sample = synthesize_sample(config, sample_index)
 
             np.save(output_dir / split / "raw" / f"sample_{idx:06d}.npy", sample.clean)
@@ -161,18 +188,15 @@ def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:
     output_dir = sanitize_output_dir(config.dataset.output_dir)
     _reset_output_dir(output_dir)
 
+    train_count, val_count, _ = _split_counts(config)
     torchsig_generated = False
     torchsig_error = ""
 
     if config.dataset.output_format == "hdf5":
-        train_count = int(config.dataset.total_samples)
-        val_count = 0
         torchsig_generated, torchsig_error = _attempt_torchsig_generation(config, output_dir)
         if not torchsig_generated:
             write_torchsig_compatible_hdf5(output_dir, config, int(config.dataset.total_samples))
     else:
-        train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
-        val_count = config.dataset.total_samples - train_count
         _generate_numpy_dataset(config, output_dir)
 
     write_config_yaml(output_dir, config)

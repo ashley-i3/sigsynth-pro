@@ -26,7 +26,12 @@ class PreviewStage:
 
 
 def _sample_rng(config: AppConfig) -> np.random.Generator:
-    seed = int(config.dataset.total_samples) * 17 + int(config.global_params.get("sample_len", 1024))
+    base_seed = config.global_params.get("seed")
+    try:
+        seed_offset = 0 if base_seed is None else int(base_seed) * 2654435761
+    except (TypeError, ValueError):
+        seed_offset = 0
+    seed = seed_offset + int(config.dataset.total_samples) * 17 + int(config.global_params.get("sample_len", 1024))
     return np.random.default_rng(seed=seed)
 
 

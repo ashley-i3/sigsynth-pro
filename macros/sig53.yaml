@@ -62,6 +62,7 @@ global_params:
   duration: 0.01048576
   snr_db: [0, 50]
   sample_len: 1048576
+  seed: 1234567890
   class_list: all
   class_distribution: uniform
   num_signals_min: 3

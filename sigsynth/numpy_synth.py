@@ -21,8 +21,14 @@ class SynthSample:
 
 
 def _sample_rng(config: AppConfig, sample_index: int, salt: int = 0) -> np.random.Generator:
+    base_seed = config.global_params.get("seed")
+    try:
+        seed_offset = 0 if base_seed is None else int(base_seed) * 2654435761
+    except (TypeError, ValueError):
+        seed_offset = 0
     seed = (
-        int(config.dataset.total_samples) * 1009
+        seed_offset
+        + int(config.dataset.total_samples) * 1009
         + int(config.global_params.get("sample_len", 1024)) * 917
         + sample_index * 65537
         + salt * 131071
@@ -37,8 +43,38 @@ def _generator_choices(config: AppConfig) -> list[str]:
     return generators
 
 
+def _generator_weights(config: AppConfig, generators: list[str]) -> np.ndarray | None:
+    weights = config.global_params.get("generator_weights")
+    if not isinstance(weights, dict):
+        return None
+
+    resolved: list[float] = []
+    has_weight = False
+    for name in generators:
+        weight = weights.get(name)
+        if weight is None:
+            weight = weights.get(_generator_family(name))
+        if weight is None:
+            weight = 1.0
+        resolved.append(float(weight))
+        has_weight = has_weight or float(weight) != 1.0
+
+    if not has_weight:
+        return None
+
+    arr = np.asarray(resolved, dtype=float)
+    total = float(np.sum(arr))
+    if total <= 0:
+        return None
+    return arr / total
+
+
 def _choose_generator(config: AppConfig, sample_index: int, rng: np.random.Generator) -> str:
     generators = _generator_choices(config)
+    weights = _generator_weights(config, generators)
+    if weights is not None:
+        return str(rng.choice(generators, p=weights))
+
     class_distribution = str(config.global_params.get("class_distribution", "")).lower()
     if class_distribution == "uniform" and len(generators) > 1:
         schedule = _uniform_generator_schedule(
@@ -384,9 +420,10 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
 
     generators = _generator_choices(config)
     class_distribution = str(config.global_params.get("class_distribution", "")).lower()
+    weights = _generator_weights(config, generators)
     start_slot = sum(component_counts[:sample_index]) if component_counts else 0
 
-    if class_distribution == "uniform" and len(generators) > 1:
+    if weights is None and class_distribution == "uniform" and len(generators) > 1:
         total_components = sum(component_counts) if component_counts else component_count
         component_schedule = _uniform_component_schedule(
             tuple(generators),
