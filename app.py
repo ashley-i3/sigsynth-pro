@@ -37,6 +37,13 @@ if "download_name" not in st.session_state:
 
 config: AppConfig = st.session_state.config
 
+FREQUENCY_UNITS = {
+    "Hz": 1.0,
+    "kHz": 1_000.0,
+    "MHz": 1_000_000.0,
+    "GHz": 1_000_000_000.0,
+}
+
 
 def render_remap_form(
     form_key: str,
@@ -172,9 +179,46 @@ with left:
         st.success("Applied generator remaps.")
 
     st.subheader("2) Global parameters")
-    sample_rate = st.number_input(
-        "Sample rate (Hz)", min_value=1_000, value=int(config.global_params.get("sample_rate", 1_000_000))
+    default_frequency_unit = "MHz"
+    current_sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
+    if current_sample_rate >= 1_000_000_000:
+        default_frequency_unit = "GHz"
+    elif current_sample_rate >= 1_000_000:
+        default_frequency_unit = "MHz"
+    elif current_sample_rate >= 1_000:
+        default_frequency_unit = "kHz"
+
+    frequency_unit = st.selectbox(
+        "Frequency unit",
+        options=list(FREQUENCY_UNITS.keys()),
+        index=list(FREQUENCY_UNITS.keys()).index(default_frequency_unit),
+        key="frequency_unit",
     )
+    frequency_scale = FREQUENCY_UNITS[frequency_unit]
+    st.caption("Values are displayed in the selected unit but stored internally in Hz.")
+    sample_rate_display = current_sample_rate / frequency_scale
+    sample_rate_display = st.number_input(
+        f"Sample rate ({frequency_unit})",
+        min_value=1_000 / frequency_scale,
+        value=float(sample_rate_display),
+        step=max(0.001, 1_000.0 / frequency_scale),
+        format="%.6f",
+    )
+    sample_rate = int(sample_rate_display * frequency_scale)
+
+    center_frequency_default = float(config.global_params.get("center_frequency_hz", 0))
+    center_frequency_limit = sample_rate / 2.0
+    center_frequency_default = max(-center_frequency_limit, min(center_frequency_default, center_frequency_limit))
+    center_frequency_display = center_frequency_default / frequency_scale
+    center_frequency_hz = st.number_input(
+        f"Band center frequency ({frequency_unit})",
+        min_value=-center_frequency_limit / frequency_scale,
+        max_value=center_frequency_limit / frequency_scale,
+        value=float(center_frequency_display),
+        step=max(0.001, max(1_000.0, sample_rate / 100.0) / frequency_scale),
+        format="%.6f",
+    )
+    center_frequency_hz = int(center_frequency_hz * frequency_scale)
     duration = st.number_input(
         "Duration (sec)", min_value=0.000001, value=float(config.global_params.get("duration", 0.001)), format="%.6f"
     )
@@ -189,6 +233,7 @@ with left:
     config.global_params.update(
         {
             "sample_rate": int(sample_rate),
+            "center_frequency_hz": int(center_frequency_hz),
             "duration": float(duration),
             "snr_db": [int(snr_min), int(snr_max)],
             "sample_len": int(sample_len),
@@ -250,7 +295,9 @@ with left:
     preview_transforms = [step.name for step in config.transforms if step.enabled and step.name in TRANSFORM_REGISTRY]
     if preview_transforms:
         preview_stages = build_transform_preview(config, preview_transforms)
-        st.caption("Approximate preview built from a synthetic sample. This helps compare the shape of the transform chain before you generate data.")
+        st.caption(
+            "Approximate preview built from a synthetic sample. This uses the selected band center so the preview matches the exported RF placement."
+        )
         with st.expander("Show preview", expanded=True):
             st.pyplot(render_preview_figure(preview_stages), clear_figure=True)
     else:

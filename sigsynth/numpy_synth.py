@@ -161,6 +161,15 @@ def _apply_burst_envelope(signal: np.ndarray, rng: np.random.Generator) -> tuple
     return (signal * window).astype(np.complex64), metadata
 
 
+def _upconvert_to_center_frequency(signal: np.ndarray, config: AppConfig) -> tuple[np.ndarray, dict[str, object]]:
+    sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
+    sample_len = len(signal)
+    center_frequency_hz = float(config.global_params.get("center_frequency_hz", 0.0))
+    t = np.arange(sample_len, dtype=float) / sample_rate
+    shifted = signal * np.exp(1j * 2.0 * np.pi * center_frequency_hz * t)
+    return shifted.astype(np.complex64), {"center_frequency_hz": center_frequency_hz}
+
+
 def _apply_channel_effects(signal: np.ndarray, config: AppConfig, sample_index: int, rng: np.random.Generator) -> tuple[np.ndarray, dict[str, object]]:
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
     sample_len = len(signal)
@@ -216,6 +225,7 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
 
     clean = _generate_baseband(generator, sample_len, sample_rate, rng)
     clean, burst_meta = _apply_burst_envelope(clean, rng)
+    clean, center_meta = _upconvert_to_center_frequency(clean, config)
     impaired, impairment_meta = _apply_channel_effects(clean, config, sample_index, rng)
 
     metadata = {
@@ -223,6 +233,7 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
         "generator": generator,
         "sample_rate": sample_rate,
         "sample_len": sample_len,
+        "center_frequency_hz": center_meta["center_frequency_hz"],
         "burst": burst_meta,
         "impairments": impairment_meta,
     }
@@ -233,4 +244,3 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
 def synthesize_dataset_pair(config: AppConfig, sample_index: int) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     sample = synthesize_sample(config, sample_index)
     return sample.clean, sample.impaired, sample.metadata
-

@@ -33,6 +33,7 @@ def _make_base_signal(config: AppConfig) -> np.ndarray:
     rng = _sample_rng(config)
     sample_len = int(config.global_params.get("sample_len", 1024))
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
+    center_frequency_hz = float(config.global_params.get("center_frequency_hz", 0.0))
     t = np.arange(sample_len, dtype=float) / sample_rate
 
     if "LFM" in config.generators:
@@ -47,6 +48,7 @@ def _make_base_signal(config: AppConfig) -> np.ndarray:
         ]
         base = sum(tones)
 
+    base *= np.exp(1j * 2 * np.pi * center_frequency_hz * t)
     base += 0.03 * (rng.standard_normal(sample_len) + 1j * rng.standard_normal(sample_len))
     return base.astype(np.complex64)
 
