@@ -98,7 +98,13 @@ def _apply_complex_to_real_magnitude(signal: np.ndarray) -> np.ndarray:
 def _apply_spectrogram(signal: np.ndarray, config: AppConfig) -> np.ndarray:
     fft_size = int(config.global_params.get("sample_len", 1024))
     fft_size = max(32, min(256, fft_size))
-    _, _, spec = stft(signal, nperseg=fft_size, noverlap=fft_size // 2, boundary=None)
+    _, _, spec = stft(
+        signal,
+        nperseg=fft_size,
+        noverlap=fft_size // 2,
+        boundary=None,
+        return_onesided=False,
+    )
     return np.abs(spec).astype(np.float32)
 
 
