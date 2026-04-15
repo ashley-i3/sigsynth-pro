@@ -8,6 +8,7 @@ from sigsynth.generator import build_dataset_zip_bytes, generate_dataset
 from sigsynth.macro_manager import MacroManager
 from sigsynth.models import AppConfig, DatasetConfig, TransformStep
 from sigsynth.paths import sanitize_output_dir
+from sigsynth.preview import build_transform_preview, render_preview_figure
 from sigsynth.registry import (
     GENERATOR_REGISTRY,
     TRANSFORM_REGISTRY,
@@ -74,6 +75,16 @@ def render_remap_form(
     return remaps, submitted
 
 
+def torchsig_runtime_available() -> bool:
+    try:
+        from torchsig.utils.defaults import TorchSigDefaults  # noqa: F401
+        from torchsig.datasets.datasets import TorchSigIterableDataset  # noqa: F401
+        from torchsig.utils.writer import DatasetCreator  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
 left, right = st.columns([2, 1])
 
 with right:
@@ -96,10 +107,24 @@ with right:
 
     st.markdown("---")
     st.subheader("Dataset")
+    if torchsig_runtime_available():
+        st.success("Runtime mode: TorchSig backend available for local HDF5 generation.")
+    else:
+        st.info("Runtime mode: TorchSig is unavailable, so HDF5 output will use the local h5py fallback.")
+    output_format_label = st.radio(
+        "Output format",
+        options=["TorchSig-compatible HDF5", "NumPy split folders"],
+        index=0 if config.dataset.output_format == "hdf5" else 1,
+        horizontal=True,
+    )
+    config.dataset.output_format = "hdf5" if output_format_label == "TorchSig-compatible HDF5" else "numpy"
     total_samples = st.number_input("Total samples", min_value=2, value=config.dataset.total_samples)
     train_ratio = st.slider("Train ratio", 0.1, 0.95, float(config.dataset.train_ratio), 0.05)
+    if config.dataset.output_format == "hdf5":
+        st.caption("Train ratio is retained in the config, but it only affects NumPy split-folder output.")
     output_dir = st.text_input("Output directory", value=config.dataset.output_dir)
     config.dataset = DatasetConfig(total_samples=int(total_samples), train_ratio=float(train_ratio), output_dir=output_dir)
+    config.dataset.output_format = "hdf5" if output_format_label == "TorchSig-compatible HDF5" else "numpy"
 
 with left:
     st.subheader("1) Generators")
@@ -221,6 +246,16 @@ with left:
     if transform_remaps_applied and unknown_transforms:
         st.success("Applied transform remaps.")
 
+    st.subheader("4) Transform preview")
+    preview_transforms = [step.name for step in config.transforms if step.enabled and step.name in TRANSFORM_REGISTRY]
+    if preview_transforms:
+        preview_stages = build_transform_preview(config, preview_transforms)
+        st.caption("Approximate preview built from a synthetic sample. This helps compare the shape of the transform chain before you generate data.")
+        with st.expander("Show preview", expanded=True):
+            st.pyplot(render_preview_figure(preview_stages), clear_figure=True)
+    else:
+        st.info("Add at least one recognized transform to see a live preview.")
+
 output_dir_error = None
 safe_output_dir = None
 try:
@@ -232,6 +267,8 @@ errors, warnings = validate_config(config)
 train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
 val_count = config.dataset.total_samples - train_count
 split_has_zero_partition = train_count == 0 or val_count == 0
+if config.dataset.output_format != "numpy":
+    split_has_zero_partition = False
 output_dir_non_empty = False
 if safe_output_dir is not None:
     output_dir_non_empty = safe_output_dir.exists() and safe_output_dir.is_dir() and any(safe_output_dir.iterdir())
@@ -270,16 +307,22 @@ if st.button("Generate dataset", type="primary", disabled=generate_disabled):
     results = generate_dataset(config)
     st.session_state.download_zip = build_dataset_zip_bytes(results["output_dir"])
     st.session_state.download_name = f"{Path(results['output_dir']).name or 'dataset'}.zip"
-    st.success(
-        "Generated dataset at "
-        f"{results['output_dir']} (train={results['train_samples']}, val={results['val_samples']})."
-    )
-    if results["torchsig_generated"]:
-        st.success("TorchSig generation backend was used.")
+    if results["output_format"] == "hdf5":
+        st.success(
+            "Generated TorchSig-compatible HDF5 dataset at "
+            f"{results['output_dir']} with {config.dataset.total_samples} samples."
+        )
+        if results["torchsig_generated"]:
+            st.success("TorchSig generation backend was used.")
+        else:
+            st.info(
+                "TorchSig was unavailable, so the app wrote a compatible data.h5 file with h5py instead."
+                f" Reason: {results['torchsig_error'] or 'unknown'}"
+            )
     else:
-        st.info(
-            "TorchSig generation backend was not used in this environment; synthetic NumPy placeholder generation was used "
-            f"instead. Reason: {results['torchsig_error'] or 'unknown'}"
+        st.success(
+            "Generated NumPy split-folder dataset at "
+            f"{results['output_dir']} (train={results['train_samples']}, val={results['val_samples']})."
         )
 
 if st.session_state.download_zip:

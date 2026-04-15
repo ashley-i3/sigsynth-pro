@@ -7,6 +7,7 @@ import zipfile
 
 import numpy as np
 
+from sigsynth.numpy_synth import synthesize_sample
 from sigsynth.models import AppConfig
 from sigsynth.hdf5_export import write_config_yaml, write_torchsig_compatible_hdf5
 from sigsynth.paths import sanitize_output_dir
@@ -120,8 +121,6 @@ def _reset_output_dir(output_dir: Path) -> None:
 
 
 def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
-    rng = np.random.default_rng(seed=53)
-    sample_len = int(config.global_params.get("sample_len", 1024))
     train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
     val_count = config.dataset.total_samples - train_count
 
@@ -136,11 +135,11 @@ def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
 
     for split, count in (("train", train_count), ("val", val_count)):
         for idx in range(count):
-            raw = rng.standard_normal(sample_len) + 1j * rng.standard_normal(sample_len)
-            impaired = raw * (1 + 0.01 * rng.standard_normal(sample_len))
+            sample_index = idx if split == "train" else train_count + idx
+            sample = synthesize_sample(config, sample_index)
 
-            np.save(output_dir / split / "raw" / f"sample_{idx:06d}.npy", raw)
-            np.save(output_dir / split / "impaired" / f"sample_{idx:06d}.npy", impaired)
+            np.save(output_dir / split / "raw" / f"sample_{idx:06d}.npy", sample.clean)
+            np.save(output_dir / split / "impaired" / f"sample_{idx:06d}.npy", sample.impaired)
 
 
 def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:

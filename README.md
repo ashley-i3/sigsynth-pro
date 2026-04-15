@@ -435,6 +435,14 @@ uv sync --extra torchsig-local
 uv run --extra torchsig-local streamlit run app.py
 ```
 
+### Streamlit Cloud
+
+Use the base app install only.
+
+- Do not enable `torchsig-local` in the cloud deployment.
+- Do not rely on the `third_party/torchsig` submodule being built in Streamlit Cloud.
+- The app will run with the NumPy or local `h5py` HDF5 fallback there.
+
 ### Notes
 
 - The app now lets you choose between TorchSig-compatible HDF5 output and NumPy split folders. For HDF5, it uses TorchSig-native generation when available and falls back to a local `h5py` writer with the same `data.h5` layout when TorchSig is unavailable.
@@ -442,4 +450,3 @@ uv run --extra torchsig-local streamlit run app.py
 - The UI shows whether the runtime is using TorchSig-backed generation or the local HDF5 fallback, and the transform preview is labeled as approximate because it uses a synthetic sample for fast feedback.
 - Generated datasets are sandboxed under `output/`, and macro files are constrained to the `macros/` directory.
 - After generation, the app provides a dataset ZIP download button so hosted Streamlit deployments can export generated artifacts.
-- Streamlit Cloud should run the app without the `torchsig-local` extra; TorchSig is only required for local development and is intentionally optional.

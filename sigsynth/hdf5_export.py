@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -9,8 +8,7 @@ import numpy as np
 import yaml
 
 from sigsynth.models import AppConfig
-from sigsynth.preview import build_transform_preview
-from sigsynth.registry import TRANSFORM_REGISTRY
+from sigsynth.numpy_synth import synthesize_sample
 
 
 def _write_scalar_dataset(group: h5py.Group, key: str, value) -> None:
@@ -44,20 +42,6 @@ def _write_scalar_dataset(group: h5py.Group, key: str, value) -> None:
     group.create_dataset(key, data=str(value), dtype=h5py.string_dtype("utf-8"))
 
 
-def _build_preview_sample(config: AppConfig, sample_index: int) -> np.ndarray:
-    sample_config = replace(
-        config,
-        dataset=replace(config.dataset, total_samples=sample_index + 1),
-    )
-    transform_names = [
-        step.name
-        for step in sample_config.transforms
-        if step.enabled and step.name in TRANSFORM_REGISTRY
-    ]
-    stages = build_transform_preview(sample_config, transform_names)
-    return np.asarray(stages[-1].data)
-
-
 def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, total_samples: int) -> Path:
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -82,7 +66,8 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
 
         for sample_index in range(total_samples):
             sample_id = f"sample_{sample_index:06d}"
-            sample_data = _build_preview_sample(config, sample_index)
+            sample = synthesize_sample(config, sample_index)
+            sample_data = sample.impaired
             data_group.create_dataset(
                 sample_id,
                 data=sample_data,
@@ -96,6 +81,7 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
             metadata_values = {
                 "sample_id": sample_id,
                 "sample_index": sample_index,
+                "generator": sample.generator,
                 "sample_rate": sample_rate,
                 "sample_len": sample_len,
                 "output_format": config.dataset.output_format,
@@ -103,6 +89,8 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
                 "generators": config.generators,
                 "transforms": [step.name for step in config.transforms if step.enabled],
                 "global_params": config.global_params,
+                "burst": sample.metadata.get("burst", {}),
+                "impairments": sample.metadata.get("impairments", {}),
             }
             for key, value in metadata_values.items():
                 _write_scalar_dataset(sample_metadata, key, value)

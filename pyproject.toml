@@ -32,4 +32,4 @@ include-package-data = true
 include = ["sigsynth*"]
 
 [tool.uv.sources]
-torchsig = { path = "third_party/torchsig", extra = "torchsig-local" }
+torchsig = { path = "third_party/torchsig", marker = "extra == 'torchsig-local'" }
