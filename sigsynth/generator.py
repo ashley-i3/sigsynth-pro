@@ -13,6 +13,7 @@ from sigsynth.hdf5_export import write_config_yaml, write_torchsig_compatible_hd
 from sigsynth.paths import sanitize_output_dir
 from sigsynth.registry import GENERATOR_REGISTRY
 from sigsynth.registry import resolve_generator_name
+from sigsynth.registry import to_torchsig_generator_name
 
 
 def _build_torchsig_metadata(config: AppConfig):
@@ -32,11 +33,15 @@ def _build_torchsig_metadata(config: AppConfig):
 
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
     sample_len = int(config.global_params.get("sample_len", 1024))
+    class_list = config.global_params.get("class_list", "all")
+    class_distribution = config.global_params.get("class_distribution", "uniform")
     nyquist = max(1, sample_rate // 2)
     frequency_limit = max(1, nyquist - 1)
     metadata = TorchSigDefaults().default_dataset_metadata
     metadata["sample_rate"] = sample_rate
     metadata["num_iq_samples_dataset"] = sample_len
+    metadata["class_list"] = class_list
+    metadata["class_distribution"] = class_distribution
     metadata["bandwidth_max"] = min(int(metadata.get("bandwidth_max", frequency_limit)), frequency_limit)
     metadata["bandwidth_min"] = min(int(metadata.get("bandwidth_min", metadata["bandwidth_max"])), metadata["bandwidth_max"])
     metadata["signal_center_freq_min"] = max(
@@ -67,9 +72,14 @@ def _build_torchsig_metadata(config: AppConfig):
     metadata["signal_duration_in_samples_min"] = duration_min
     metadata["signal_duration_in_samples_max"] = duration_max
 
-    if "wideband" in generator_tags:
-        metadata["num_signals_min"] = max(int(metadata.get("num_signals_min", 1)), 1)
-        metadata["num_signals_max"] = max(int(metadata.get("num_signals_max", 1)), 3)
+    explicit_num_signals_min = config.global_params.get("num_signals_min")
+    explicit_num_signals_max = config.global_params.get("num_signals_max")
+    if explicit_num_signals_min is not None or explicit_num_signals_max is not None:
+        metadata["num_signals_min"] = int(explicit_num_signals_min or 1)
+        metadata["num_signals_max"] = int(explicit_num_signals_max or metadata["num_signals_min"])
+    elif "wideband" in generator_tags:
+        metadata["num_signals_min"] = max(int(metadata.get("num_signals_min", 1)), 3)
+        metadata["num_signals_max"] = max(int(metadata.get("num_signals_max", 1)), 5)
     else:
         metadata["num_signals_min"] = 1
         metadata["num_signals_max"] = 1
@@ -89,7 +99,12 @@ def _attempt_torchsig_generation(config: AppConfig, output_dir: Path) -> tuple[b
     try:
         metadata = _build_torchsig_metadata(config)
         batch_size = max(1, min(256, int(config.dataset.total_samples)))
+        torchsig_generators = [
+            to_torchsig_generator_name(name) or name.lower()
+            for name in config.generators
+        ]
         dataset = TorchSigIterableDataset(
+            signal_generators=torchsig_generators,
             metadata=metadata,
             transforms=[],
             component_transforms=[],

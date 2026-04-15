@@ -308,10 +308,11 @@ dataset/
 
 * Matches TorchSig Sig53 dataset:
 
-  * Generator composition
-  * Parameter distributions
-  * Transform pipeline
-  * Dataset structure
+  * Concrete TorchSig generator roster
+  * Uniform class distribution across the full class list
+  * Wideband multi-signal recipe via `num_signals_min=3` and `num_signals_max=5`
+  * Parameter distributions and transform pipeline aligned with the current TorchSig 2.1-style metadata syntax
+  * Dataset structure and metadata written alongside the exported data
 
 ---
 

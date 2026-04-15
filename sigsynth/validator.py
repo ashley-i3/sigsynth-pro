@@ -36,7 +36,7 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
             errors.append(f"Generator '{generator_name}' is not registered.")
             continue
         for group in meta.parameter_groups:
-            has_group = group in config.global_params or group in config.generator_overrides.get(generator_name, {})
+            has_group = group in config.global_params or group in config.generator_overrides.get(canonical_generator_name, {})
             if not has_group:
                 errors.append(f"Generator '{generator_name}' requires parameter group '{group}'.")
 

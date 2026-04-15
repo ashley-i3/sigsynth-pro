@@ -11,9 +11,12 @@ from sigsynth.paths import sanitize_output_dir
 from sigsynth.preview import build_transform_preview, render_preview_figure
 from sigsynth.registry import (
     GENERATOR_REGISTRY,
+    TORCHSIG_CONCRETE_GENERATORS,
+    is_torchsig_concrete_generator,
     TRANSFORM_REGISTRY,
     resolve_generator_name,
     resolve_transform_name,
+    to_torchsig_generator_name,
 )
 from sigsynth.validator import validate_config
 
@@ -43,6 +46,15 @@ FREQUENCY_UNITS = {
     "MHz": 1_000_000.0,
     "GHz": 1_000_000_000.0,
 }
+
+TORCHSIG_GENERATOR_GROUPS: list[tuple[str, list[str]]] = [
+    ("Tones and chirps", ["tone", "chirpss", "lfm-data", "lfm-radar"]),
+    ("OFDM", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.startswith("ofdm-")]),
+    ("PSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("psk")]),
+    ("QAM", [name for name in TORCHSIG_CONCRETE_GENERATORS if "qam" in name]),
+    ("FSK / MSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("fsk") or name.endswith("msk")]),
+    ("AM / FM / OOK", ["fm", "ook", "am-dsb", "am-dsb-sc", "am-usb", "am-lsb"]),
+]
 
 
 def render_remap_form(
@@ -80,6 +92,32 @@ def render_remap_form(
         st.rerun()
 
     return remaps, submitted
+
+
+def render_grouped_generator_selector(
+    group_specs: list[tuple[str, list[str]]],
+    resolved_generators: list[str],
+) -> list[str]:
+    selected: list[str] = []
+
+    st.caption("Grouped by modulation family so the concrete TorchSig catalog is easier to scan.")
+    for group_name, group_options in group_specs:
+        available_defaults = [name for name in resolved_generators if name in group_options]
+        with st.expander(group_name, expanded=group_name in {"PSK", "QAM"}):
+            group_selected = st.multiselect(
+                group_name,
+                options=group_options,
+                default=available_defaults,
+                key=f"torchsig_group::{group_name}",
+                label_visibility="collapsed",
+            )
+            selected.extend(group_selected)
+
+    deduped: list[str] = []
+    for name in selected:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
 
 
 def torchsig_runtime_available() -> bool:
@@ -125,6 +163,16 @@ with right:
         horizontal=True,
     )
     config.dataset.output_format = "hdf5" if output_format_label == "TorchSig-compatible HDF5" else "numpy"
+    generator_catalog_default = "TorchSig concrete labels" if any(
+        is_torchsig_concrete_generator(name) for name in config.generators
+    ) else "Simplified families"
+    generator_catalog = st.radio(
+        "Generator catalog",
+        options=["Simplified families", "TorchSig concrete labels"],
+        index=0 if generator_catalog_default == "Simplified families" else 1,
+        horizontal=True,
+    )
+    config.global_params["generator_catalog"] = generator_catalog
     total_samples = st.number_input("Total samples", min_value=2, value=config.dataset.total_samples)
     train_ratio = st.slider("Train ratio", 0.1, 0.95, float(config.dataset.train_ratio), 0.05)
     if config.dataset.output_format == "hdf5":
@@ -135,50 +183,85 @@ with right:
 
 with left:
     st.subheader("1) Generators")
-    generator_options = sorted(GENERATOR_REGISTRY.keys())
+    generator_catalog = config.global_params.get("generator_catalog", "Simplified families")
     resolved_generators = []
     unknown_generators = []
-    for name in config.generators:
-        canonical_name = resolve_generator_name(name)
-        if canonical_name:
-            if canonical_name not in resolved_generators:
-                resolved_generators.append(canonical_name)
-        else:
-            unknown_generators.append(name)
-
-    if unknown_generators:
-        st.warning(
-            "Macro contains legacy or unknown generator names that need attention: "
-            f"{', '.join(unknown_generators)}"
+    if generator_catalog == "TorchSig concrete labels":
+        for name in config.generators:
+            if is_torchsig_concrete_generator(name):
+                if name not in resolved_generators:
+                    resolved_generators.append(name)
+            else:
+                mapped_name = to_torchsig_generator_name(name)
+                if mapped_name and mapped_name not in resolved_generators:
+                    resolved_generators.append(mapped_name)
+                elif not mapped_name:
+                    unknown_generators.append(name)
+        selected_generators = render_grouped_generator_selector(
+            group_specs=TORCHSIG_GENERATOR_GROUPS,
+            resolved_generators=resolved_generators,
         )
-    selected_generators = st.multiselect(
-        "Choose signal generators",
-        options=generator_options,
-        default=resolved_generators,
-    )
-    generator_suggestions = {
-        name: resolve_generator_name(name)
-        for name in unknown_generators
-    }
-    generator_remaps, generator_remaps_applied = render_remap_form(
-        form_key="generator_remap_form",
-        legacy_names=unknown_generators,
-        options=generator_options,
-        labels={name: f"Replace '{name}' with" for name in unknown_generators},
-        suggestion_map=generator_suggestions,
-    )
-    remapped_generators = list(selected_generators)
-    for legacy_name, replacement in generator_remaps.items():
-        if replacement != "<keep unresolved>" and replacement not in remapped_generators:
-            remapped_generators.append(replacement)
-        elif replacement == "<keep unresolved>":
-            remapped_generators.append(legacy_name)
+        if unknown_generators:
+            st.warning(
+                "Macro contains legacy or unknown generator names that need attention: "
+                f"{', '.join(unknown_generators)}"
+            )
+            generator_remaps, generator_remaps_applied = render_remap_form(
+                form_key="torchsig_generator_remap_form",
+                legacy_names=unknown_generators,
+                options=TORCHSIG_CONCRETE_GENERATORS,
+                labels={name: f"Replace '{name}' with" for name in unknown_generators},
+                suggestion_map={name: to_torchsig_generator_name(name) for name in unknown_generators},
+            )
+            for legacy_name, replacement in generator_remaps.items():
+                if replacement != "<keep unresolved>" and replacement not in selected_generators:
+                    selected_generators.append(replacement)
+                elif replacement == "<keep unresolved>":
+                    selected_generators.append(legacy_name)
+            if generator_remaps_applied:
+                st.success("Applied generator remaps.")
+    else:
+        generator_options = sorted(GENERATOR_REGISTRY.keys())
+        for name in config.generators:
+            canonical_name = resolve_generator_name(name)
+            if canonical_name and canonical_name not in resolved_generators:
+                resolved_generators.append(canonical_name)
+        if unknown_generators:
+            st.warning(
+                "Macro contains legacy or unknown generator names that need attention: "
+                f"{', '.join(unknown_generators)}"
+            )
+        selected_generators = st.multiselect(
+            "Choose signal generators",
+            options=generator_options,
+            default=resolved_generators,
+        )
+        generator_suggestions = {
+            name: resolve_generator_name(name)
+            for name in unknown_generators
+        }
+        generator_remaps, generator_remaps_applied = render_remap_form(
+            form_key="generator_remap_form",
+            legacy_names=unknown_generators,
+            options=generator_options,
+            labels={name: f"Replace '{name}' with" for name in unknown_generators},
+            suggestion_map=generator_suggestions,
+        )
+        remapped_generators = list(selected_generators)
+        for legacy_name, replacement in generator_remaps.items():
+            if replacement != "<keep unresolved>" and replacement not in remapped_generators:
+                remapped_generators.append(replacement)
+            elif replacement == "<keep unresolved>":
+                remapped_generators.append(legacy_name)
 
-    config.generators = remapped_generators
-    if generator_remaps_applied and unknown_generators:
-        st.success("Applied generator remaps.")
+        selected_generators = remapped_generators
+        if generator_remaps_applied and unknown_generators:
+            st.success("Applied generator remaps.")
+
+    config.generators = selected_generators
 
     st.subheader("2) Global parameters")
+    selected_generator_families = {resolve_generator_name(name) or name for name in config.generators}
     default_frequency_unit = "MHz"
     current_sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
     if current_sample_rate >= 1_000_000_000:
@@ -240,7 +323,7 @@ with left:
         }
     )
 
-    if "LFM" in config.generators:
+    if "LFM" in selected_generator_families:
         st.info("LFM selected: chirp parameters are required.")
         sweep_hz = st.number_input("LFM sweep bandwidth (Hz)", min_value=1_000, value=50_000)
         config.generator_overrides.setdefault("LFM", {})["chirp"] = {"sweep_hz": int(sweep_hz)}

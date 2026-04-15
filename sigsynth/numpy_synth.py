@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
@@ -28,45 +30,145 @@ def _sample_rng(config: AppConfig, sample_index: int, salt: int = 0) -> np.rando
     return np.random.default_rng(seed=seed)
 
 
-def _choose_generator(config: AppConfig, rng: np.random.Generator) -> str:
-    generators = [resolve_generator_name(name) or name for name in config.generators]
-    generators = [name for name in generators if name]
+def _generator_choices(config: AppConfig) -> list[str]:
+    generators = list(dict.fromkeys(name for name in config.generators if name))
     if not generators:
-        return "BPSK"
+        return ["BPSK"]
+    return generators
+
+
+def _choose_generator(config: AppConfig, sample_index: int, rng: np.random.Generator) -> str:
+    generators = _generator_choices(config)
+    class_distribution = str(config.global_params.get("class_distribution", "")).lower()
+    if class_distribution == "uniform" and len(generators) > 1:
+        schedule = _uniform_generator_schedule(
+            tuple(generators),
+            int(config.dataset.total_samples),
+            _distribution_seed(config),
+        )
+        if schedule:
+            return schedule[sample_index % len(schedule)]
     return generators[int(rng.integers(0, len(generators)))]
 
 
+def _distribution_seed(config: AppConfig) -> int:
+    configured_seed = config.global_params.get("seed")
+    if configured_seed is not None:
+        try:
+            return int(configured_seed)
+        except (TypeError, ValueError):
+            pass
+
+    seed_material = "|".join(
+        [
+            str(config.dataset.total_samples),
+            str(config.dataset.train_ratio),
+            str(config.dataset.output_format),
+            str(config.global_params.get("sample_rate", 1_000_000)),
+            str(config.global_params.get("sample_len", 1024)),
+            str(config.global_params.get("class_distribution", "unset")),
+            ",".join(dict.fromkeys(name for name in config.generators if name)),
+        ]
+    )
+    return int.from_bytes(sha256(seed_material.encode("utf-8")).digest()[:8], "little")
+
+
+@lru_cache(maxsize=64)
+def _uniform_generator_schedule(generators: tuple[str, ...], total_samples: int, seed: int) -> tuple[str, ...]:
+    if not generators or total_samples <= 0:
+        return tuple()
+
+    base_count, remainder = divmod(total_samples, len(generators))
+    schedule: list[str] = []
+    for index, name in enumerate(generators):
+        repeats = base_count + (1 if index < remainder else 0)
+        schedule.extend([name] * repeats)
+
+    rng = np.random.default_rng(seed)
+    rng.shuffle(schedule)
+    return tuple(schedule)
+
+
+@lru_cache(maxsize=64)
+def _uniform_component_schedule(
+    generators: tuple[str, ...], total_components: int, seed: int
+) -> tuple[str, ...]:
+    if not generators or total_components <= 0:
+        return tuple()
+
+    base_count, remainder = divmod(total_components, len(generators))
+    schedule: list[str] = []
+    for index, name in enumerate(generators):
+        repeats = base_count + (1 if index < remainder else 0)
+        schedule.extend([name] * repeats)
+
+    rng = np.random.default_rng(seed ^ 0x5A5A5A5A)
+    rng.shuffle(schedule)
+    return tuple(schedule)
+
+
+@lru_cache(maxsize=64)
+def _component_count_schedule(total_samples: int, minimum: int, maximum: int, seed: int) -> tuple[int, ...]:
+    if total_samples <= 0:
+        return tuple()
+    rng = np.random.default_rng(seed ^ 0xA5A5A5A5)
+    return tuple(int(x) for x in rng.integers(minimum, maximum + 1, size=total_samples))
+
+
+def _generator_family(generator: str) -> str:
+    return resolve_generator_name(generator) or generator
+
+
+def _order_from_name(name: str, default: int) -> int:
+    digits = "".join(ch for ch in name if ch.isdigit())
+    if digits:
+        return max(2, int(digits))
+    return default
+
+
 def _constellation_for(generator: str) -> np.ndarray:
-    if generator == "BPSK":
+    family = _generator_family(generator)
+    if family == "BPSK":
         return np.array([-1.0, 1.0], dtype=np.complex64)
-    if generator == "QPSK":
+    if family == "QPSK":
         return np.array(
             [1 + 1j, 1 - 1j, -1 + 1j, -1 - 1j],
             dtype=np.complex64,
         ) / np.sqrt(2.0)
-    if generator == "8PSK":
-        angles = np.arange(8, dtype=float) * (2.0 * np.pi / 8.0)
+    if family in {"8PSK", "PSK"}:
+        order = 8 if family == "8PSK" else _order_from_name(generator, 8)
+        angles = np.arange(order, dtype=float) * (2.0 * np.pi / order)
         return np.exp(1j * angles).astype(np.complex64)
-    if generator == "QAM16":
-        levels = np.array([-3, -1, 1, 3], dtype=float)
+    if family in {"QAM16", "QAM64", "QAM"}:
+        order = _order_from_name(generator, 64 if family == "QAM64" else 16)
+        side = int(np.sqrt(order))
+        if side * side != order:
+            side = int(2 ** np.ceil(np.log2(np.sqrt(order))))
+            order = side * side
+        levels = np.arange(-(side - 1), side, 2, dtype=float)
         constellation = [complex(i, q) for i in levels for q in levels]
         arr = np.asarray(constellation, dtype=np.complex64)
         return arr / np.sqrt(np.mean(np.abs(arr) ** 2))
-    if generator == "QAM64":
-        levels = np.array([-7, -5, -3, -1, 1, 3, 5, 7], dtype=float)
-        constellation = [complex(i, q) for i in levels for q in levels]
-        arr = np.asarray(constellation, dtype=np.complex64)
-        return arr / np.sqrt(np.mean(np.abs(arr) ** 2))
+    if family in {"Tone", "AM", "FM", "OFDM", "ChirpSS", "LFM"}:
+        return np.array([1.0], dtype=np.complex64)
+    if family == "OOK":
+        return np.array([0.0, 1.0], dtype=np.complex64)
+    if family in {"FSK", "GFSK", "MSK", "GMSK"}:
+        order = _order_from_name(generator, 4)
+        return np.arange(order, dtype=np.float32).astype(np.complex64)
     return np.array([-1.0, 1.0], dtype=np.complex64)
 
 
 def _symbol_rate_for(generator: str, sample_rate: int, rng: np.random.Generator) -> int:
-    if generator == "OFDM":
+    family = _generator_family(generator)
+    if family == "OFDM":
         return max(8, sample_rate // 128)
-    if generator == "LFM":
+    if family in {"LFM", "ChirpSS"}:
         return max(8, sample_rate // 256)
-    if generator in {"QAM64", "QAM16"}:
+    if family in {"QAM64", "QAM16", "QAM"}:
         return max(8, sample_rate // int(rng.integers(48, 96)))
+    if family in {"PSK", "FSK", "GFSK", "MSK", "GMSK", "AM", "FM", "OOK", "Tone"}:
+        return max(8, sample_rate // int(rng.integers(48, 128)))
     return max(8, sample_rate // int(rng.integers(64, 160)))
 
 
@@ -110,18 +212,64 @@ def _pulse_shape(symbols: np.ndarray, samples_per_symbol: int) -> np.ndarray:
 
 
 def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: np.random.Generator) -> np.ndarray:
+    family = _generator_family(generator)
     symbol_rate = _symbol_rate_for(generator, sample_rate, rng)
     samples_per_symbol = max(2, sample_rate // symbol_rate)
     num_symbols = max(8, int(np.ceil(sample_len / samples_per_symbol)) + 4)
 
-    if generator == "LFM":
+    if family == "Tone":
+        tone_hz = float(rng.uniform(-0.08, 0.08) * sample_rate)
+        t = np.arange(sample_len, dtype=float) / sample_rate
+        return np.exp(1j * 2.0 * np.pi * tone_hz * t).astype(np.complex64)
+
+    if family == "FM":
+        t = np.arange(sample_len, dtype=float) / sample_rate
+        mod = rng.standard_normal(sample_len).astype(np.float32)
+        mod = np.convolve(mod, np.ones(16) / 16.0, mode="same")
+        deviation_hz = float(rng.uniform(0.02, 0.12) * sample_rate)
+        phase = 2.0 * np.pi * np.cumsum(mod) * deviation_hz / sample_rate
+        return np.exp(1j * phase).astype(np.complex64)
+
+    if family in {"AM", "OOK"}:
+        t = np.arange(sample_len, dtype=float) / sample_rate
+        carrier_hz = float(rng.uniform(-0.06, 0.06) * sample_rate)
+        symbol_stream = rng.integers(0, 2, size=num_symbols).astype(np.float32)
+        if family == "AM":
+            symbol_stream = 0.4 + 0.6 * symbol_stream
+        shaped = np.repeat(symbol_stream, samples_per_symbol)
+        if len(shaped) < sample_len:
+            shaped = np.pad(shaped, (0, sample_len - len(shaped)), constant_values=shaped[-1] if len(shaped) else 0.0)
+        envelope = shaped[:sample_len]
+        return (envelope * np.exp(1j * 2.0 * np.pi * carrier_hz * t)).astype(np.complex64)
+
+    if family in {"FSK", "GFSK", "MSK", "GMSK"}:
+        order = _order_from_name(generator, 4)
+        t = np.arange(sample_len, dtype=float) / sample_rate
+        symbols = rng.integers(0, order, size=num_symbols).astype(np.float32)
+        freq_levels = np.linspace(-0.12, 0.12, order, dtype=np.float32) * sample_rate
+        freq = np.repeat(freq_levels[symbols.astype(int)], samples_per_symbol)
+        if len(freq) < sample_len:
+            freq = np.pad(freq, (0, sample_len - len(freq)), mode="edge")
+        freq = freq[:sample_len]
+        if family in {"GFSK", "GMSK"}:
+            freq = np.convolve(freq, np.ones(9) / 9.0, mode="same")
+        phase = 2.0 * np.pi * np.cumsum(freq) / sample_rate
+        return np.exp(1j * phase).astype(np.complex64)
+
+    if family == "LFM":
         t = np.arange(sample_len, dtype=float) / sample_rate
         sweep_hz = float(rng.uniform(0.05, 0.28) * sample_rate)
         chirp_rate = sweep_hz / max(t[-1], 1e-9)
         phase = 2.0 * np.pi * (0.5 * chirp_rate * t**2)
         return np.exp(1j * phase).astype(np.complex64)
 
-    if generator == "OFDM":
+    if family == "ChirpSS":
+        t = np.arange(sample_len, dtype=float) / sample_rate
+        sweep_hz = float(rng.uniform(0.08, 0.18) * sample_rate)
+        phase = 2.0 * np.pi * (0.5 * (sweep_hz / max(t[-1], 1e-9)) * t**2)
+        return np.exp(1j * phase).astype(np.complex64)
+
+    if family == "OFDM":
         n_subcarriers = int(rng.integers(8, 24))
         fft_size = 1
         while fft_size < n_subcarriers * 2:
@@ -221,24 +369,82 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
     rng = _sample_rng(config, sample_index)
     sample_len = int(config.global_params.get("sample_len", 1024))
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
-    generator = _choose_generator(config, rng)
+    min_components = int(config.global_params.get("num_signals_min", 1))
+    max_components = int(config.global_params.get("num_signals_max", max(1, min_components)))
+    if max_components < min_components:
+        max_components = min_components
 
-    clean = _generate_baseband(generator, sample_len, sample_rate, rng)
-    clean, burst_meta = _apply_burst_envelope(clean, rng)
-    clean, center_meta = _upconvert_to_center_frequency(clean, config)
+    component_counts = _component_count_schedule(
+        int(config.dataset.total_samples),
+        min_components,
+        max_components,
+        _distribution_seed(config),
+    )
+    component_count = component_counts[sample_index % len(component_counts)] if component_counts else 1
+
+    generators = _generator_choices(config)
+    class_distribution = str(config.global_params.get("class_distribution", "")).lower()
+    start_slot = sum(component_counts[:sample_index]) if component_counts else 0
+
+    if class_distribution == "uniform" and len(generators) > 1:
+        total_components = sum(component_counts) if component_counts else component_count
+        component_schedule = _uniform_component_schedule(
+            tuple(generators),
+            total_components,
+            _distribution_seed(config),
+        )
+    else:
+        component_schedule = tuple()
+
+    clean = np.zeros(sample_len, dtype=np.complex64)
+    components: list[dict[str, object]] = []
+    for component_index in range(component_count):
+        component_rng = _sample_rng(config, sample_index, salt=component_index + 1)
+        if component_schedule:
+            generator = component_schedule[(start_slot + component_index) % len(component_schedule)]
+        else:
+            generator = _choose_generator(config, sample_index + component_index, component_rng)
+        family = _generator_family(generator)
+        baseband = _generate_baseband(generator, sample_len, sample_rate, component_rng)
+        baseband, burst_meta = _apply_burst_envelope(baseband, component_rng)
+
+        component_center = float(
+            np.clip(
+                config.global_params.get("center_frequency_hz", 0.0)
+                + component_rng.uniform(-0.32, 0.32) * sample_rate,
+                -sample_rate / 2.0,
+                sample_rate / 2.0,
+            )
+        )
+        t = np.arange(sample_len, dtype=float) / sample_rate
+        component_clean = baseband * np.exp(1j * 2.0 * np.pi * component_center * t)
+        clean += component_clean.astype(np.complex64)
+        components.append(
+            {
+                "generator": generator,
+                "family": family,
+                "center_frequency_hz": component_center,
+                "burst": burst_meta,
+            }
+        )
+
+    primary_generator = components[0]["generator"] if components else _choose_generator(config, sample_index, rng)
+    primary_family = _generator_family(str(primary_generator))
     impaired, impairment_meta = _apply_channel_effects(clean, config, sample_index, rng)
 
     metadata = {
         "sample_index": sample_index,
-        "generator": generator,
+        "generator": primary_generator,
+        "family": primary_family,
         "sample_rate": sample_rate,
         "sample_len": sample_len,
-        "center_frequency_hz": center_meta["center_frequency_hz"],
-        "burst": burst_meta,
+        "class_distribution": config.global_params.get("class_distribution"),
+        "num_components": component_count,
+        "components": components,
         "impairments": impairment_meta,
     }
 
-    return SynthSample(generator=generator, clean=clean, impaired=impaired, metadata=metadata)
+    return SynthSample(generator=str(primary_generator), clean=clean, impaired=impaired, metadata=metadata)
 
 
 def synthesize_dataset_pair(config: AppConfig, sample_index: int) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:

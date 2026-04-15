@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import stft
 
 from sigsynth.models import AppConfig
+from sigsynth.registry import resolve_generator_name
 
 
 @dataclass
@@ -35,18 +36,22 @@ def _make_base_signal(config: AppConfig) -> np.ndarray:
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
     center_frequency_hz = float(config.global_params.get("center_frequency_hz", 0.0))
     t = np.arange(sample_len, dtype=float) / sample_rate
+    resolved_generators = {resolve_generator_name(name) or name for name in config.generators}
 
-    if "LFM" in config.generators:
+    def _fm_demo_tone() -> np.ndarray:
+        carrier_hz = 66.6
+        modulation = 8.0 * np.sin(2.0 * np.pi * 0.75 * t) + 2.5 * np.sin(2.0 * np.pi * 3.25 * t)
+        instantaneous_freq = carrier_hz + modulation
+        phase = 2.0 * np.pi * np.cumsum(instantaneous_freq) / sample_rate
+        return np.exp(1j * phase)
+
+    if "LFM" in resolved_generators or "ChirpSS" in resolved_generators:
         sweep_hz = float(config.generator_overrides.get("LFM", {}).get("chirp", {}).get("sweep_hz", sample_rate / 4))
         chirp_rate = sweep_hz / max(t[-1], 1e-9)
         phase = 2 * np.pi * (0.5 * chirp_rate * t**2)
         base = np.exp(1j * phase)
     else:
-        tones = [
-            np.exp(1j * 2 * np.pi * 0.07 * sample_rate * t),
-            0.65 * np.exp(-1j * 2 * np.pi * 0.13 * sample_rate * t),
-        ]
-        base = sum(tones)
+        base = _fm_demo_tone()
 
     base *= np.exp(1j * 2 * np.pi * center_frequency_hz * t)
     base += 0.03 * (rng.standard_normal(sample_len) + 1j * rng.standard_normal(sample_len))

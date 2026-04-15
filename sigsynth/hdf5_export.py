@@ -31,6 +31,10 @@ def _write_scalar_dataset(group: h5py.Group, key: str, value) -> None:
             serialized = json.dumps(list(value))
             group.create_dataset(key, data=serialized, dtype=h5py.string_dtype("utf-8"))
             return
+        if all(isinstance(item, dict) for item in value):
+            serialized = json.dumps(value, sort_keys=True)
+            group.create_dataset(key, data=serialized, dtype=h5py.string_dtype("utf-8"))
+            return
         group.create_dataset(key, data=np.asarray(value))
         return
 
@@ -89,11 +93,20 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
                 "generators": config.generators,
                 "transforms": [step.name for step in config.transforms if step.enabled],
                 "global_params": config.global_params,
-                "burst": sample.metadata.get("burst", {}),
+                "class_list": config.global_params.get("class_list"),
+                "class_distribution": config.global_params.get("class_distribution"),
+                "num_components": sample.metadata.get("num_components"),
+                "components": sample.metadata.get("components", []),
                 "impairments": sample.metadata.get("impairments", {}),
             }
             for key, value in metadata_values.items():
                 _write_scalar_dataset(sample_metadata, key, value)
+
+            component_group = h5["component_signals"].create_group(sample_id)
+            for component_index, component in enumerate(sample.metadata.get("components", [])):
+                sub_group = component_group.create_group(f"component_{component_index:03d}")
+                for key, value in component.items():
+                    _write_scalar_dataset(sub_group, key, value)
 
             index_group.create_dataset(str(sample_index), data=sample_id, dtype=h5py.string_dtype("utf-8"))
 

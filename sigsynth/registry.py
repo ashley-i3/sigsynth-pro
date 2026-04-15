@@ -5,7 +5,76 @@ import re
 from sigsynth.models import GeneratorMeta, TransformMeta
 
 
+TORCHSIG_CONCRETE_GENERATORS: list[str] = [
+    "tone",
+    "ofdm-64",
+    "ofdm-72",
+    "ofdm-128",
+    "ofdm-180",
+    "ofdm-256",
+    "ofdm-300",
+    "ofdm-512",
+    "ofdm-600",
+    "ofdm-900",
+    "ofdm-1024",
+    "ofdm-1200",
+    "ofdm-2048",
+    "lfm-data",
+    "lfm-radar",
+    "2fsk",
+    "4fsk",
+    "8fsk",
+    "16fsk",
+    "2gfsk",
+    "4gfsk",
+    "8gfsk",
+    "16gfsk",
+    "2msk",
+    "4msk",
+    "8msk",
+    "16msk",
+    "2gmsk",
+    "4gmsk",
+    "8gmsk",
+    "16gmsk",
+    "fm",
+    "ook",
+    "bpsk",
+    "qpsk",
+    "8psk",
+    "16psk",
+    "32psk",
+    "64psk",
+    "4ask",
+    "8ask",
+    "16ask",
+    "32ask",
+    "64ask",
+    "16qam",
+    "32qam",
+    "64qam",
+    "256qam",
+    "1024qam",
+    "32qam_cross",
+    "128qam_cross",
+    "512qam_cross",
+    "chirpss",
+    "am-dsb",
+    "am-dsb-sc",
+    "am-usb",
+    "am-lsb",
+]
+
+TORCHSIG_CONCRETE_SET = set(TORCHSIG_CONCRETE_GENERATORS)
+
+
 GENERATOR_REGISTRY: dict[str, GeneratorMeta] = {
+    "Tone": GeneratorMeta(
+        name="Tone",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
     "BPSK": GeneratorMeta(
         name="BPSK",
         produces=["complex_iq"],
@@ -36,6 +105,60 @@ GENERATOR_REGISTRY: dict[str, GeneratorMeta] = {
         requires=["baseband"],
         tags=["narrowband"],
     ),
+    "PSK": GeneratorMeta(
+        name="PSK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "QAM": GeneratorMeta(
+        name="QAM",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "FSK": GeneratorMeta(
+        name="FSK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "GFSK": GeneratorMeta(
+        name="GFSK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "MSK": GeneratorMeta(
+        name="MSK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "GMSK": GeneratorMeta(
+        name="GMSK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "AM": GeneratorMeta(
+        name="AM",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "FM": GeneratorMeta(
+        name="FM",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "OOK": GeneratorMeta(
+        name="OOK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
     "LFM": GeneratorMeta(
         name="LFM",
         produces=["complex_iq"],
@@ -45,6 +168,12 @@ GENERATOR_REGISTRY: dict[str, GeneratorMeta] = {
     ),
     "OFDM": GeneratorMeta(
         name="OFDM",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["wideband"],
+    ),
+    "ChirpSS": GeneratorMeta(
+        name="ChirpSS",
         produces=["complex_iq"],
         requires=["baseband"],
         tags=["wideband"],
@@ -108,7 +237,74 @@ def resolve_generator_name(name: str) -> str | None:
     """Resolve a generator name using case-insensitive and punctuation-insensitive matching."""
     if name in GENERATOR_REGISTRY:
         return name
-    return GENERATOR_ALIASES.get(_normalize_registry_key(name))
+    normalized = _normalize_registry_key(name)
+    if normalized in GENERATOR_ALIASES:
+        return GENERATOR_ALIASES[normalized]
+    if normalized.startswith("ofdm"):
+        return "OFDM"
+    if normalized.startswith("lfm"):
+        return "LFM"
+    if normalized.startswith("chirpss"):
+        return "ChirpSS"
+    if normalized.startswith("am"):
+        return "AM"
+    if normalized == "fm":
+        return "FM"
+    if normalized == "ook":
+        return "OOK"
+    if normalized.endswith("gmsk"):
+        return "GMSK"
+    if normalized.endswith("gfsk"):
+        return "GFSK"
+    if normalized.endswith("msk"):
+        return "MSK"
+    if normalized.endswith("fsk"):
+        return "FSK"
+    if normalized.endswith("psk"):
+        if normalized in {"bpsk", "qpsk", "8psk"}:
+            return GENERATOR_ALIASES.get(normalized)
+        return "PSK"
+    if "qamcross" in normalized or normalized.endswith("qam"):
+        if normalized in {"qam16", "qam64"}:
+            return GENERATOR_ALIASES.get(normalized)
+        return "QAM"
+    if normalized == "tone":
+        return "Tone"
+    return None
+
+
+def is_torchsig_concrete_generator(name: str) -> bool:
+    return _normalize_registry_key(name) in TORCHSIG_CONCRETE_SET
+
+
+def to_torchsig_generator_name(name: str) -> str | None:
+    normalized = _normalize_registry_key(name)
+    if normalized in TORCHSIG_CONCRETE_SET:
+        return normalized
+    canonical = resolve_generator_name(name)
+    if canonical is None:
+        return None
+    mapping = {
+        "Tone": "tone",
+        "BPSK": "bpsk",
+        "QPSK": "qpsk",
+        "8PSK": "8psk",
+        "PSK": "8psk",
+        "QAM16": "16qam",
+        "QAM64": "64qam",
+        "QAM": "16qam",
+        "FSK": "4fsk",
+        "GFSK": "4gfsk",
+        "MSK": "4msk",
+        "GMSK": "4gmsk",
+        "AM": "am-dsb",
+        "FM": "fm",
+        "OOK": "ook",
+        "LFM": "lfm-data",
+        "OFDM": "ofdm-128",
+        "ChirpSS": "chirpss",
+    }
+    return mapping.get(canonical)
 
 
 def resolve_transform_name(name: str) -> str | None:
