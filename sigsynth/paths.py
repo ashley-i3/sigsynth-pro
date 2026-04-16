@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+# Whitelisted absolute paths for large dataset storage
+ALLOWED_DATA_DIRS = [Path("/data1"), Path("/data2"), Path("/data3")]
+
 
 def sanitize_macro_name(macro_name: str) -> str:
     candidate = Path(macro_name)
@@ -28,8 +31,19 @@ def sanitize_output_dir(output_dir: str | Path, base_dir: str | Path = "output")
 
     if user_path.is_absolute():
         resolved = user_path.resolve()
+
+        # Check if path is in allowed data directories
+        for allowed_dir in ALLOWED_DATA_DIRS:
+            if resolved == allowed_dir or allowed_dir in resolved.parents:
+                # Path is in allowed directory, return it
+                return resolved
+
+        # Otherwise check sandbox
         if resolved != resolved_base and resolved_base not in resolved.parents:
-            raise ValueError("Dataset output directory must stay inside the output sandbox.")
+            raise ValueError(
+                "Dataset output directory must stay inside the output sandbox "
+                "or be within /data1, /data2, or /data3."
+            )
         return resolved
 
     if ".." in user_path.parts:

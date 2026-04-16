@@ -36,6 +36,10 @@ class DatasetConfig:
     output_dir: str = "output/dataset"
     output_format: str = "hdf5"
     split_mode: str = "split"
+    create_batch_size: int = 256
+    create_num_workers: int = 0  # HDF5 writing is not thread-safe, use single process
+    max_memory_mb: int | None = None
+    compression_level: int = 0  # gzip compression (0-9). 0=disabled for speed, enable for space savings
 
 
 @dataclass

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 from pathlib import Path
 
@@ -54,7 +55,18 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
     sample_len = int(config.global_params.get("sample_len", 1024))
 
-    with h5py.File(datapath, "w", libver="latest") as h5:
+    # Performance optimizations for large sequential writes:
+    # - rdcc_nbytes: Raw data chunk cache size (64 MB, up from default 1 MB)
+    # - rdcc_nslots: Number of chunk slots in cache (521 is prime number for good hash distribution)
+    # - rdcc_w0: Chunk preemption policy (0 = pure LRU, 1 = fully read chunks always preempted)
+    with h5py.File(
+        datapath,
+        "w",
+        libver="latest",
+        rdcc_nbytes=64 * 1024 * 1024,  # 64 MB chunk cache
+        rdcc_nslots=521,  # Prime number for good hash distribution
+        rdcc_w0=0.75,  # Balanced preemption policy
+    ) as h5:
         h5.attrs["created_by"] = "sigsynth"
         h5.attrs["dataset_format"] = "torchsig_compatible_hdf5"
         h5.attrs["output_format"] = config.dataset.output_format
@@ -68,6 +80,30 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
         index_group = h5.create_group("index")
         h5.create_group("component_signals")
 
+        # Calculate appropriate chunk size for HDF5
+        # For large samples (>1MB), use the full sample as chunk
+        # For small samples, use default chunking
+        sample_size_mb = (sample_len * 8) / (1024 * 1024)  # complex64 = 8 bytes
+        if sample_size_mb >= 1.0:
+            # Large samples: chunk = full sample (better for random access)
+            chunk_shape = (sample_len,)
+        else:
+            # Small samples: let HDF5 choose, or use sensible default
+            chunk_shape = None  # Auto-chunking
+
+        # Get compression level from config (default 0 = disabled for speed)
+        compression_level = getattr(config.dataset, "compression_level", 0)
+        compression_level = max(0, min(9, compression_level))  # Clamp to valid range
+
+        # GC when we hit EITHER threshold (more frequent = safer):
+        # - At least every 100 samples (avoid excessive overhead for tiny samples)
+        # - At most every 8 GB of data (prevent memory buildup for large samples)
+        # With 64-128 GB memory limits, 8 GB gives good balance between GC overhead and memory safety
+        bytes_per_sample = sample_len * 8  # complex64 = 8 bytes
+        gc_interval_bytes = 8 * 1024 * 1024 * 1024  # 8 GB max memory between GCs
+        gc_interval_samples = max(100, gc_interval_bytes // max(1, bytes_per_sample))  # At least 100 samples
+        bytes_written_since_gc = 0
+
         for sample_index in range(total_samples):
             sample_id = f"sample_{sample_index:06d}"
             sample = synthesize_sample(config, sample_index)
@@ -76,9 +112,10 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
                 sample_id,
                 data=sample_data,
                 compression="gzip",
-                compression_opts=6,
+                compression_opts=compression_level,
                 shuffle=True,
                 fletcher32=True,
+                chunks=chunk_shape,
             )
 
             sample_metadata = metadata_group.create_group(sample_id)
@@ -110,6 +147,20 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
 
             index_group.create_dataset(str(sample_index), data=sample_id, dtype=h5py.string_dtype("utf-8"))
 
+            # Memory management: explicit cleanup after each sample
+            del sample_data
+            del sample
+
+            bytes_written_since_gc += bytes_per_sample
+
+            # Flush and GC based on data volume (~1 GB) rather than sample count
+            # This avoids excessive overhead for small samples and ensures cleanup for large samples
+            if bytes_written_since_gc >= gc_interval_bytes or (sample_index + 1) % gc_interval_samples == 0:
+                h5.flush()
+                gc.collect()
+                bytes_written_since_gc = 0
+                print(f"HDF5 Progress: {sample_index + 1}/{total_samples} samples ({(sample_index + 1) / total_samples * 100:.1f}%)")
+
     dataset_info = {
         "format": "torchsig_compatible_hdf5",
         "output_format": config.dataset.output_format,
@@ -125,8 +176,8 @@ def write_torchsig_compatible_hdf5(output_dir: str | Path, config: AppConfig, to
     writer_info = {
         "root": str(root),
         "overwrite": True,
-        "batch_size": 1,
-        "num_workers": 0,
+        "batch_size": config.dataset.create_batch_size,
+        "num_workers": config.dataset.create_num_workers,
         "complete": True,
         "backend": "fallback_h5py",
     }
