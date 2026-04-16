@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sigsynth"
+version = "0.1.0"
+description = "TorchSig dataset builder and macro UI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "h5py",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "scipy",
+    "streamlit",
+    "torch",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+torchsig-local = [
+    "torchsig==2.1.0",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["sigsynth*"]
+
+[tool.uv.sources]
+torchsig = { path = "third_party/torchsig", marker = "extra == 'torchsig-local'" }

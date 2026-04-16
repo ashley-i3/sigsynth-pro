@@ -1,0 +1,82 @@
+schema_version: "1.0"
+generators:
+  - tone
+  - ofdm-64
+  - ofdm-72
+  - ofdm-128
+  - ofdm-180
+  - ofdm-256
+  - ofdm-300
+  - ofdm-512
+  - ofdm-600
+  - ofdm-900
+  - ofdm-1024
+  - ofdm-1200
+  - ofdm-2048
+  - lfm-data
+  - lfm-radar
+  - 2fsk
+  - 4fsk
+  - 8fsk
+  - 16fsk
+  - 2gfsk
+  - 4gfsk
+  - 8gfsk
+  - 16gfsk
+  - 2msk
+  - 4msk
+  - 8msk
+  - 16msk
+  - 2gmsk
+  - 4gmsk
+  - 8gmsk
+  - 16gmsk
+  - fm
+  - ook
+  - bpsk
+  - qpsk
+  - 8psk
+  - 16psk
+  - 32psk
+  - 64psk
+  - 4ask
+  - 8ask
+  - 16ask
+  - 32ask
+  - 64ask
+  - 16qam
+  - 32qam
+  - 64qam
+  - 256qam
+  - 1024qam
+  - 32qam_cross
+  - 128qam_cross
+  - 512qam_cross
+  - chirpss
+  - am-dsb
+  - am-dsb-sc
+  - am-usb
+  - am-lsb
+global_params:
+  sample_rate: 100000000
+  duration: 0.01048576
+  snr_db: [0, 50]
+  sample_len: 1048576
+  seed: 1234567890
+  class_list: all
+  class_distribution: uniform
+  num_signals_min: 3
+  num_signals_max: 5
+  cochannel_overlap_probability: 0.2
+generator_overrides: {}
+transforms:
+  - name: AWGN
+    enabled: true
+  - name: FreqOffset
+    enabled: true
+  - name: IQImbalance
+    enabled: true
+dataset:
+  total_samples: 5300
+  train_ratio: 0.8
+  output_dir: output/sig53

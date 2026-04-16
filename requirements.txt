@@ -1,0 +1,22 @@
+# Core numerical + ML
+numpy
+scipy
+torch
+
+# TorchSig is optional and local-only; install with `uv sync --extra torchsig-local`
+
+# Config + serialization
+pyyaml
+
+# GUI
+streamlit
+
+# Data handling
+h5py
+pandas
+
+# Visualization (for previews later)
+matplotlib
+
+# Utility
+tqdm
