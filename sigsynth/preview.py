@@ -126,11 +126,32 @@ def build_transform_preview(config: AppConfig, transform_names: list[str], max_s
 
 
 def _zoom_spectrogram(data: np.ndarray, target_fraction: float = 0.35) -> np.ndarray:
+    """
+    Zoom spectrogram to show signal with context.
+
+    For narrowband signals, shows more surrounding empty frequency space
+    to illustrate the true bandwidth characteristics.
+    """
     if data.ndim != 2 or data.shape[0] < 8:
         return data
 
     energy = np.mean(np.abs(data), axis=1)
     center = int(np.argmax(energy))
+
+    # Detect if signal is narrowband by measuring energy concentration
+    # Calculate what fraction of total energy is in the top 20% of frequency bins
+    sorted_energy = np.sort(energy)[::-1]
+    top_20_percent_bins = max(1, int(len(energy) * 0.2))
+    energy_concentration = np.sum(sorted_energy[:top_20_percent_bins]) / max(np.sum(energy), 1e-10)
+
+    # If > 80% of energy is in 20% of bins, it's narrowband - show more context
+    if energy_concentration > 0.8:
+        # Narrowband: show 70% of spectrum to see surrounding empty space
+        target_fraction = 0.7
+    else:
+        # Wideband: use tighter zoom to focus on signal detail
+        target_fraction = 0.35
+
     half_span = max(16, int(data.shape[0] * target_fraction / 2.0))
     start = max(0, center - half_span)
     stop = min(data.shape[0], center + half_span)

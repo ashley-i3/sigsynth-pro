@@ -68,6 +68,22 @@ TORCHSIG_CONCRETE_GENERATORS: list[str] = [
 TORCHSIG_CONCRETE_SET = set(TORCHSIG_CONCRETE_GENERATORS)
 
 
+# The canonical 53 modulations from the original Sig53 dataset
+# Reference: torchsig/datasets/modulations.py ModulationsDataset.default_classes
+SIG53_MODULATIONS: list[str] = [
+    "ook", "bpsk", "4pam", "4ask", "qpsk", "8pam", "8ask", "8psk",
+    "16qam", "16pam", "16ask", "16psk", "32qam", "32qam_cross",
+    "32pam", "32ask", "32psk", "64qam", "64pam", "64ask", "64psk",
+    "128qam_cross", "256qam", "512qam_cross", "1024qam",
+    "2fsk", "2gfsk", "2msk", "2gmsk", "4fsk", "4gfsk", "4msk", "4gmsk",
+    "8fsk", "8gfsk", "8msk", "8gmsk", "16fsk", "16gfsk", "16msk", "16gmsk",
+    "ofdm-64", "ofdm-72", "ofdm-128", "ofdm-180", "ofdm-256", "ofdm-300",
+    "ofdm-512", "ofdm-600", "ofdm-900", "ofdm-1024", "ofdm-1200", "ofdm-2048",
+]
+
+SIG53_MODULATIONS_SET = set(SIG53_MODULATIONS)
+
+
 GENERATOR_REGISTRY: dict[str, GeneratorMeta] = {
     "Tone": GeneratorMeta(
         name="Tone",
@@ -113,6 +129,12 @@ GENERATOR_REGISTRY: dict[str, GeneratorMeta] = {
     ),
     "ASK": GeneratorMeta(
         name="ASK",
+        produces=["complex_iq"],
+        requires=["baseband"],
+        tags=["narrowband"],
+    ),
+    "PAM": GeneratorMeta(
+        name="PAM",
         produces=["complex_iq"],
         requires=["baseband"],
         tags=["narrowband"],
@@ -222,6 +244,30 @@ TRANSFORM_REGISTRY: dict[str, TransformMeta] = {
         produces=["complex_iq"],
         constraints={"incompatible_with": ["chirp_preserving"]},
     ),
+    "RandomPhaseShift": TransformMeta(
+        name="RandomPhaseShift",
+        accepts=["complex_iq"],
+        produces=["complex_iq"],
+        modifies=["phase"],
+    ),
+    "RandomTimeShift": TransformMeta(
+        name="RandomTimeShift",
+        accepts=["complex_iq"],
+        produces=["complex_iq"],
+        modifies=["start_time"],
+    ),
+    "RayleighFadingChannel": TransformMeta(
+        name="RayleighFadingChannel",
+        accepts=["complex_iq"],
+        produces=["complex_iq"],
+        modifies=["multipath"],
+    ),
+    "RandomResample": TransformMeta(
+        name="RandomResample",
+        accepts=["complex_iq"],
+        produces=["complex_iq"],
+        modifies=["sample_rate"],
+    ),
 }
 
 
@@ -253,6 +299,11 @@ def resolve_generator_name(name: str) -> str | None:
         "8psk": "8PSK",
         "16qam": "QAM16",
         "64qam": "QAM64",
+        "4pam": "PAM",
+        "8pam": "PAM",
+        "16pam": "PAM",
+        "32pam": "PAM",
+        "64pam": "PAM",
         "4ask": "ASK",
         "8ask": "ASK",
         "16ask": "ASK",
@@ -320,6 +371,8 @@ def resolve_generator_name(name: str) -> str | None:
         return "FSK"
     if normalized.endswith("psk"):
         return "PSK"
+    if normalized.endswith("pam"):
+        return "PAM"
     if normalized.endswith("ask"):
         return "ASK"
     if "qamcross" in normalized or normalized.endswith("qam"):

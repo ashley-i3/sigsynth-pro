@@ -1184,8 +1184,10 @@ if generation_scope == "Full official family":
             base_root,
             test_mode=test_run_mode,
         )
-        st.session_state.download_zip = build_dataset_zip_bytes(family_root)
-        st.session_state.download_name = f"{family_root.name or 'official_family'}.zip"
+        download_zip = build_dataset_zip_bytes(family_root)
+        if download_zip:
+            st.session_state.download_zip = download_zip
+            st.session_state.download_name = f"{family_root.name or 'official_family'}.zip"
         success_prefix = "Test run: Generated" if test_run_mode else "Generated"
         st.success(
             f"{success_prefix} the full official family at "
@@ -1216,8 +1218,10 @@ elif selected_dataset_preset != "Custom":
             base_root,
             test_mode=test_run_mode,
         )
-        st.session_state.download_zip = build_dataset_zip_bytes(group_root)
-        st.session_state.download_name = f"{group_root.name or 'dataset_pair'}.zip"
+        download_zip = build_dataset_zip_bytes(group_root)
+        if download_zip:
+            st.session_state.download_zip = download_zip
+            st.session_state.download_name = f"{group_root.name or 'dataset_pair'}.zip"
         success_prefix = "Test run: Generated" if test_run_mode else "Generated"
         st.success(
             f"{success_prefix} paired official datasets at "
@@ -1246,8 +1250,10 @@ else:
             config.dataset.output_dir = f"{config.dataset.output_dir}_test"
             config.dataset.total_samples = max(100, int(config.dataset.total_samples * 0.1))
         results = generate_dataset(config)
-        st.session_state.download_zip = build_dataset_zip_bytes(results["output_dir"])
-        st.session_state.download_name = f"{Path(results['output_dir']).name or 'dataset'}.zip"
+        download_zip = build_dataset_zip_bytes(results["output_dir"])
+        if download_zip:
+            st.session_state.download_zip = download_zip
+            st.session_state.download_name = f"{Path(results['output_dir']).name or 'dataset'}.zip"
 
         success_prefix = "Test run: Generated" if test_run_mode else "Generated"
         if results["output_format"] == "hdf5":
@@ -1276,24 +1282,13 @@ else:
                 st.info(f"This was a test run. Full dataset would have {full_train:,} train and {full_val:,} val samples.")
 
 if st.session_state.download_zip:
-    # Only allow download for datasets < 1GB to prevent memory issues
-    dataset_size_gb = len(st.session_state.download_zip) / (1024**3)
-
-    if dataset_size_gb < 1.0:
-        st.download_button(
-            "Download generated dataset (.zip)",
-            data=st.session_state.download_zip,
-            file_name=st.session_state.download_name,
-            mime="application/zip",
-            use_container_width=True,
-        )
-    else:
-        st.warning(
-            f"Dataset is too large to download via browser ({dataset_size_gb:.1f} GB). "
-            f"Files are available on disk - check the output directory path above."
-        )
-        # Free memory immediately
-        st.session_state.download_zip = None
+    st.download_button(
+        "Download generated dataset (.zip)",
+        data=st.session_state.download_zip,
+        file_name=st.session_state.download_name,
+        mime="application/zip",
+        use_container_width=True,
+    )
 
 st.markdown("---")
 st.subheader("Current Config Snapshot")

@@ -191,6 +191,13 @@ def _constellation_for(generator: str) -> np.ndarray:
         levels = levels - np.mean(levels)
         levels = levels / np.sqrt(np.mean(levels**2))
         return levels.astype(np.complex64)
+    if family == "PAM":
+        order = _order_from_name(generator, 16)
+        # Unipolar: 0 to 1 (like original Sig53 PAM)
+        levels = np.linspace(0, 1, order, dtype=float)
+        # Normalize to unit power
+        levels = levels / np.sqrt(np.mean(levels**2))
+        return levels.astype(np.complex64)
     if family in {"Tone", "AM", "FM", "OFDM", "ChirpSS", "LFM"}:
         return np.array([1.0], dtype=np.complex64)
     if family == "OOK":
@@ -209,12 +216,12 @@ def _symbol_rate_for(generator: str, sample_rate: int, rng: np.random.Generator)
         return max(8, sample_rate // 256)
     if family in {"QAM64", "QAM16", "QAM"}:
         return max(8, sample_rate // int(rng.integers(48, 96)))
-    if family in {"ASK", "PSK", "FSK", "GFSK", "MSK", "GMSK", "AM", "FM", "OOK", "Tone"}:
+    if family in {"ASK", "PAM", "PSK", "FSK", "GFSK", "MSK", "GMSK", "AM", "FM", "OOK", "Tone"}:
         return max(8, sample_rate // int(rng.integers(48, 128)))
     return max(8, sample_rate // int(rng.integers(64, 160)))
 
 
-def _rrc_taps(samples_per_symbol: int, span: int = 8, beta: float = 0.35) -> np.ndarray:
+def _rrc_taps(samples_per_symbol: int, span: int = 11, beta: float = 0.35) -> np.ndarray:
     num_taps = span * samples_per_symbol + 1
     t = np.arange(num_taps, dtype=float) - (num_taps - 1) / 2.0
     t = t / max(samples_per_symbol, 1)

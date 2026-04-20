@@ -4,6 +4,7 @@ import gc
 import io
 import resource
 import shutil
+import warnings
 from pathlib import Path
 import zipfile
 
@@ -17,6 +18,31 @@ from sigsynth.post_transforms import NUMPY_POST_TRANSFORMS, apply_post_transform
 from sigsynth.registry import GENERATOR_REGISTRY
 from sigsynth.registry import resolve_generator_name
 from sigsynth.registry import to_torchsig_generator_name
+
+
+def _validate_sig53_generators(config: AppConfig) -> tuple[bool, list[str]]:
+    """Check if generators match Sig53 specification (informational only).
+
+    Returns:
+        (is_valid, warnings): is_valid is True if exactly 53 Sig53 modulations,
+                             warnings is a list of informational messages.
+    """
+    from sigsynth.registry import SIG53_MODULATIONS_SET
+
+    # Normalize generator names to match Sig53 format (lowercase, handle dashes/underscores)
+    normalized_generators = set(name.lower().replace("_", "-") for name in config.generators)
+
+    warnings = []
+    extra_mods = normalized_generators - SIG53_MODULATIONS_SET
+    missing_mods = SIG53_MODULATIONS_SET - normalized_generators
+
+    if extra_mods:
+        warnings.append(f"Extra modulations not in Sig53: {sorted(extra_mods)[:5]}{'...' if len(extra_mods) > 5 else ''}")
+    if missing_mods:
+        warnings.append(f"Missing Sig53 modulations: {sorted(missing_mods)[:5]}{'...' if len(missing_mods) > 5 else ''}")
+
+    is_valid = len(normalized_generators) == 53 and not extra_mods and not missing_mods
+    return is_valid, warnings
 
 
 def _build_torchsig_metadata(config: AppConfig):
@@ -110,6 +136,16 @@ def _build_torchsig_metadata(config: AppConfig):
         metadata["num_signals_min"] = 1
         metadata["num_signals_max"] = 1
 
+    # Validate Sig53 compatibility if class_list is "all" (informational only)
+    if class_list == "all":
+        is_valid, validation_info = _validate_sig53_generators(config)
+        if not is_valid:
+            print("\nINFO: Generator list differs from original Sig53 specification (53 modulations):")
+            for msg in validation_info:
+                print(f"  {msg}")
+            print(f"  Current generator count: {len(config.generators)}")
+            print("  Note: Generation will proceed with your custom configuration.")
+
     return metadata
 
 
@@ -174,6 +210,10 @@ def _attempt_torchsig_generation(config: AppConfig, output_dir: Path) -> tuple[b
     dataloader = None
     dataset = None
     try:
+        # Suppress TorchSig's "signal too large to fit in spectrogram" warning
+        # This warning is expected for narrowband signals and doesn't indicate a problem
+        warnings.filterwarnings("ignore", message="generated signal is too large to fit in spectrogram")
+
         metadata = _build_torchsig_metadata(config)
         batch_size = config.dataset.create_batch_size
         torchsig_generators = [
@@ -371,12 +411,64 @@ def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:
     }
 
 
-def build_dataset_zip_bytes(output_dir: str | Path) -> bytes:
+def _estimate_dataset_size_bytes(output_dir: Path) -> int:
+    """Estimate the total size of a dataset directory in bytes."""
+    total_size = 0
+    for file_path in output_dir.rglob("*"):
+        if file_path.is_file():
+            try:
+                total_size += file_path.stat().st_size
+            except (OSError, FileNotFoundError):
+                continue
+    return total_size
+
+
+def build_dataset_zip_bytes(output_dir: str | Path, max_size_bytes: int = 500 * 1024 * 1024) -> bytes | None:
+    """
+    Build a zip file of the dataset, but only if it's small enough to fit in memory.
+
+    Args:
+        output_dir: Directory containing the dataset
+        max_size_bytes: Maximum size (default 500MB) - won't create zip if dataset exceeds this
+
+    Returns:
+        bytes: The zip file contents if successful
+        None: If dataset is too large or an error occurred
+    """
+    import tempfile
+
     root = sanitize_output_dir(output_dir)
-    memory_file = io.BytesIO()
-    with zipfile.ZipFile(memory_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_path in root.rglob("*"):
-            if file_path.is_file():
-                zf.write(file_path, arcname=file_path.relative_to(root))
-    memory_file.seek(0)
-    return memory_file.getvalue()
+
+    # Check dataset size BEFORE creating zip
+    dataset_size = _estimate_dataset_size_bytes(root)
+    if dataset_size > max_size_bytes:
+        print(f"Dataset too large for in-memory zip: {dataset_size / (1024**3):.2f} GB")
+        return None
+
+    # Use a temporary file for zip creation to avoid memory exhaustion
+    try:
+        with tempfile.NamedTemporaryFile(mode='w+b', suffix='.zip', delete=False) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            try:
+                # Write zip to disk first
+                with zipfile.ZipFile(tmp_file, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for file_path in root.rglob("*"):
+                        if file_path.is_file():
+                            zf.write(file_path, arcname=file_path.relative_to(root))
+
+                # Check resulting zip size
+                zip_size = tmp_path.stat().st_size
+                if zip_size > max_size_bytes:
+                    print(f"Compressed zip too large: {zip_size / (1024**3):.2f} GB")
+                    return None
+
+                # Only load into memory if small enough
+                with open(tmp_path, 'rb') as f:
+                    return f.read()
+            finally:
+                # Clean up temp file
+                if tmp_path.exists():
+                    tmp_path.unlink()
+    except (OSError, MemoryError, zipfile.BadZipFile) as e:
+        print(f"Error creating dataset zip: {e}")
+        return None
