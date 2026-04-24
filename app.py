@@ -12,6 +12,7 @@ from sigsynth.paths import sanitize_output_dir
 from sigsynth.preview import build_transform_preview, render_preview_figure
 from sigsynth.registry import (
     GENERATOR_REGISTRY,
+    SIG53_MODULATIONS,
     TORCHSIG_CONCRETE_GENERATORS,
     is_torchsig_concrete_generator,
     TRANSFORM_REGISTRY,
@@ -264,6 +265,7 @@ TORCHSIG_GENERATOR_GROUPS: list[tuple[str, list[str]]] = [
     ("Tones and chirps", ["tone", "chirpss", "lfm-data", "lfm-radar"]),
     ("OFDM", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.startswith("ofdm-")]),
     ("PSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("psk")]),
+    ("PAM", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("pam")]),
     ("ASK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("ask")]),
     ("QAM", [name for name in TORCHSIG_CONCRETE_GENERATORS if "qam" in name]),
     ("FSK / MSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("fsk") or name.endswith("msk")]),
@@ -300,6 +302,31 @@ def apply_dataset_preset(preset_name: str) -> None:
     config.dataset.total_samples = preset["total_samples"]
     config.dataset.split_mode = preset["split_mode"]
     config.dataset.output_format = preset["output_format"]
+
+    # Set transforms based on impairment level (Sig53 level 2)
+    impairment_level = preset.get("impairment_level", 0)
+    if impairment_level >= 2:
+        # Sig53 level 2 impairments
+        config.transforms = [
+            TransformStep(name="RandomPhaseShift", enabled=True),
+            TransformStep(name="RandomTimeShift", enabled=True),
+            TransformStep(name="FreqOffset", enabled=True),
+            TransformStep(name="RayleighFadingChannel", enabled=True),
+            TransformStep(name="IQImbalance", enabled=True),
+            TransformStep(name="RandomResample", enabled=True),
+            TransformStep(name="AWGN", enabled=True),
+        ]
+    elif impairment_level == 0:
+        # Clean: only AWGN at very high SNR (handled by snr_db range)
+        config.transforms = [TransformStep(name="AWGN", enabled=True)]
+    else:
+        # Level 1 or other: basic impairments
+        config.transforms = [
+            TransformStep(name="FreqOffset", enabled=True),
+            TransformStep(name="IQImbalance", enabled=True),
+            TransformStep(name="AWGN", enabled=True),
+        ]
+
     seed_length_widget_state(config, force=True)
 
 
@@ -328,7 +355,27 @@ def build_config_for_dataset_preset(preset_name: str, output_dir: Path, test_mod
         preset_config.global_params["cochannel_overlap_probability"] = preset["cochannel_overlap_probability"]
     preset_config.generators = list(config.generators)
     preset_config.generator_overrides = deepcopy(config.generator_overrides)
-    preset_config.transforms = deepcopy(config.transforms)
+
+    # Set transforms based on impairment level
+    impairment_level = preset.get("impairment_level", 0)
+    if impairment_level >= 2:
+        preset_config.transforms = [
+            TransformStep(name="RandomPhaseShift", enabled=True),
+            TransformStep(name="RandomTimeShift", enabled=True),
+            TransformStep(name="FreqOffset", enabled=True),
+            TransformStep(name="RayleighFadingChannel", enabled=True),
+            TransformStep(name="IQImbalance", enabled=True),
+            TransformStep(name="RandomResample", enabled=True),
+            TransformStep(name="AWGN", enabled=True),
+        ]
+    elif impairment_level == 0:
+        preset_config.transforms = [TransformStep(name="AWGN", enabled=True)]
+    else:
+        preset_config.transforms = [
+            TransformStep(name="FreqOffset", enabled=True),
+            TransformStep(name="IQImbalance", enabled=True),
+            TransformStep(name="AWGN", enabled=True),
+        ]
 
     # Apply test mode reduction if requested
     total_samples = preset["total_samples"]
@@ -483,6 +530,15 @@ def render_remap_form(
         return remaps, False
 
     suggestion_button_key = f"{form_key}::use_suggestions"
+
+    # Button must be BEFORE the form to avoid session state modification errors
+    if st.button("Use suggestions for all", key=suggestion_button_key, use_container_width=True):
+        for index, legacy_name in enumerate(legacy_names):
+            suggested = suggestion_map.get(legacy_name)
+            target_value = suggested if suggested in options else "<keep unresolved>"
+            st.session_state[f"{form_key}::{index}::{legacy_name}"] = target_value
+        st.rerun()
+
     with st.form(form_key):
         st.caption("Pick replacements for unresolved names to migrate older macros.")
         for index, legacy_name in enumerate(legacy_names):
@@ -498,13 +554,6 @@ def render_remap_form(
             )
         submitted = st.form_submit_button("Apply remaps")
 
-    if st.button("Use suggestions for all", key=suggestion_button_key, use_container_width=True):
-        for index, legacy_name in enumerate(legacy_names):
-            suggested = suggestion_map.get(legacy_name)
-            target_value = suggested if suggested in options else "<keep unresolved>"
-            st.session_state[f"{form_key}::{index}::{legacy_name}"] = target_value
-        st.rerun()
-
     return remaps, submitted
 
 
@@ -517,14 +566,24 @@ def render_grouped_generator_selector(
     st.caption("Grouped by modulation family so the concrete TorchSig catalog is easier to scan.")
     for group_name, group_options in group_specs:
         available_defaults = [name for name in resolved_generators if name in group_options]
+        widget_key = f"torchsig_group::{group_name}"
         with st.expander(group_name, expanded=group_name in {"PSK", "QAM"}):
-            group_selected = st.multiselect(
-                group_name,
-                options=group_options,
-                default=available_defaults,
-                key=f"torchsig_group::{group_name}",
-                label_visibility="collapsed",
-            )
+            # Only provide default if session state doesn't already have a value
+            if widget_key in st.session_state:
+                group_selected = st.multiselect(
+                    group_name,
+                    options=group_options,
+                    key=widget_key,
+                    label_visibility="collapsed",
+                )
+            else:
+                group_selected = st.multiselect(
+                    group_name,
+                    options=group_options,
+                    default=available_defaults,
+                    key=widget_key,
+                    label_visibility="collapsed",
+                )
             selected.extend(group_selected)
 
     deduped: list[str] = []
@@ -552,8 +611,18 @@ with right:
     selected_macro = st.selectbox("Available macros", options=["<none>"] + macros)
 
     if st.button("Load macro", use_container_width=True) and selected_macro != "<none>":
-        st.session_state.config = macro_manager.load(selected_macro)
+        loaded_config = macro_manager.load(selected_macro)
+        st.session_state.config = loaded_config
         seed_length_widget_state(st.session_state.config, force=True)
+
+        # Update generator widget state with loaded generators
+        # Group generators by their group name
+        for group_name, group_options in TORCHSIG_GENERATOR_GROUPS:
+            key = f"torchsig_group::{group_name}"
+            # Set session state to loaded generators that belong to this group
+            group_generators = [g for g in loaded_config.generators if g in group_options]
+            st.session_state[key] = group_generators
+
         st.rerun()
 
     save_name = st.text_input("Save macro as", value="new_macro.yaml")
@@ -618,8 +687,10 @@ with right:
         if config.global_params.get("dataset_preset") != family_preview_preset:
             apply_dataset_preset(family_preview_preset)
         ensure_lfm_chirp_override(config)
-        if config.generators != list(TORCHSIG_CONCRETE_GENERATORS):
-            config.generators = list(TORCHSIG_CONCRETE_GENERATORS)
+        # Use 53 generators for Sig53 official set, all generators for Wideband
+        target_generators = list(SIG53_MODULATIONS) if selected_official_family == "Sig53 official set" else list(TORCHSIG_CONCRETE_GENERATORS)
+        if config.generators != target_generators:
+            config.generators = target_generators
         st.info(
             "This will generate every split in the family below. Each split gets its own directory with a single HDF5 file "
             "(HDF5 is hierarchical internally, not a directory tree). All splits will be written to the output directory on disk. "
@@ -814,10 +885,12 @@ with left:
     unknown_generators = []
     full_family_mode = generation_scope == "Full official family"
     if full_family_mode:
-        selected_generators = list(TORCHSIG_CONCRETE_GENERATORS)
+        # Use 53 generators for Sig53 official set, all generators for Wideband
+        selected_generators = list(SIG53_MODULATIONS) if selected_official_family == "Sig53 official set" else list(TORCHSIG_CONCRETE_GENERATORS)
         config.generators = selected_generators
+        family_label = "Sig53" if selected_official_family == "Sig53 official set" else "Wideband Sig53"
         st.info(
-            f"Full official family mode is using the full TorchSig concrete generator catalog ({len(config.generators)} generators)."
+            f"Full official family mode is using the {family_label} generator catalog ({len(config.generators)} generators)."
         )
         with st.expander("Selected generators", expanded=False):
             st.write(", ".join(config.generators))
@@ -860,22 +933,30 @@ with left:
         generator_options = sorted(GENERATOR_REGISTRY.keys())
         for name in config.generators:
             canonical_name = resolve_generator_name(name)
-            if canonical_name and canonical_name not in resolved_generators:
-                resolved_generators.append(canonical_name)
+            if canonical_name:
+                # If the name itself is in the registry, keep it; otherwise it's a variant
+                if name in GENERATOR_REGISTRY and name not in resolved_generators:
+                    resolved_generators.append(name)
+                elif canonical_name not in resolved_generators:
+                    resolved_generators.append(canonical_name)
+                # Track variants as unknown so they can be remapped
+                if name not in GENERATOR_REGISTRY:
+                    unknown_generators.append(name)
+            else:
+                unknown_generators.append(name)
         if unknown_generators:
             st.warning(
                 "Macro contains legacy or unknown generator names that need attention: "
                 f"{', '.join(unknown_generators)}"
             )
-        selected_generators = st.multiselect(
-            "Choose signal generators",
-            options=generator_options,
-            default=resolved_generators,
-        )
+
+        # Build generator suggestions for unknown generators
         generator_suggestions = {
             name: resolve_generator_name(name)
             for name in unknown_generators
         }
+
+        # Render remap form BEFORE multiselect so button can modify defaults
         generator_remaps, generator_remaps_applied = render_remap_form(
             form_key="generator_remap_form",
             legacy_names=unknown_generators,
@@ -883,6 +964,21 @@ with left:
             labels={name: f"Replace '{name}' with" for name in unknown_generators},
             suggestion_map=generator_suggestions,
         )
+
+        # If remaps were applied, add suggested values to resolved_generators
+        if generator_remaps_applied or unknown_generators:
+            for legacy_name in unknown_generators:
+                suggested = generator_suggestions.get(legacy_name)
+                if suggested and suggested not in resolved_generators:
+                    resolved_generators.append(suggested)
+
+        selected_generators = st.multiselect(
+            "Choose signal generators",
+            options=generator_options,
+            default=resolved_generators,
+        )
+
+        # Apply manual remap selections
         remapped_generators = list(selected_generators)
         for legacy_name, replacement in generator_remaps.items():
             if replacement != "<keep unresolved>" and replacement not in remapped_generators:
@@ -895,9 +991,6 @@ with left:
             st.success("Applied generator remaps.")
 
     config.generators = selected_generators
-    if st.session_state.get("demo_preview_mode", False) and selected_generators != ["Tone"]:
-        st.session_state["demo_preview_mode"] = False
-        st.rerun()
 
     st.subheader("2) Global parameters")
     selected_generator_families = {resolve_generator_name(name) or name for name in config.generators}
@@ -1099,11 +1192,16 @@ with left:
         else:
             preview_transforms = ["AWGN", *[name for name in preview_transforms if name != "AWGN"]]
     if preview_transforms:
-        preview_stages = build_transform_preview(preview_config, preview_transforms)
-        st.caption(
-            "Approximate preview built from a clean tone, then the selected preview transforms, then a single spectrogram view that is zoomed to the active band. "
-            "Demo mode injects AWGN once so the tone remains visible in the preview."
-        )
+        preview_stages = build_transform_preview(preview_config, preview_transforms, use_demo=demo_preview_mode)
+        if demo_preview_mode:
+            st.caption(
+                "Demo preview showing a 66.6 Hz tone with selected transforms. "
+                "Uncheck 'Use demo preview tone' to see an actual dataset sample."
+            )
+        else:
+            st.caption(
+                "Preview showing an actual dataset sample (index 0) from your configuration with selected transforms applied."
+            )
         with st.expander("Show preview", expanded=True):
             st.pyplot(render_preview_figure(preview_stages, preview_config), clear_figure=True)
     else:

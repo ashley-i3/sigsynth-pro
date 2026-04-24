@@ -471,14 +471,18 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
         baseband = _generate_baseband(generator, sample_len, sample_rate, component_rng)
         baseband, burst_meta = _apply_burst_envelope(baseband, component_rng)
 
-        component_center = float(
-            np.clip(
-                config.global_params.get("center_frequency_hz", 0.0)
-                + component_rng.uniform(-0.32, 0.32) * sample_rate,
-                -sample_rate / 2.0,
-                sample_rate / 2.0,
-            )
-        )
+        # Get center frequency range from metadata (Sig53: ±16% of sample_rate)
+        signal_center_freq_min = float(config.global_params.get("signal_center_freq_min",
+                                                                 -sample_rate * 0.16))
+        signal_center_freq_max = float(config.global_params.get("signal_center_freq_max",
+                                                                 sample_rate * 0.16))
+
+        # Sample initial center frequency uniformly from allowed range
+        component_center = float(component_rng.uniform(signal_center_freq_min,
+                                                       signal_center_freq_max))
+
+        # Clip to Nyquist limits
+        component_center = float(np.clip(component_center, -sample_rate / 2.0, sample_rate / 2.0))
         t = np.arange(sample_len, dtype=float) / sample_rate
         component_clean = baseband * np.exp(1j * 2.0 * np.pi * component_center * t)
         clean += component_clean.astype(np.complex64)

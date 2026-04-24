@@ -64,6 +64,7 @@ global_params:
   num_signals_min: 3
   num_signals_max: 5
   cochannel_overlap_probability: 0.2
+  generator_catalog: TorchSig concrete labels
 generator_overrides: {}
 transforms:
   - name: RandomPhaseShift

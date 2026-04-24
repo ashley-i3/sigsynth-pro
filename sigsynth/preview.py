@@ -14,12 +14,17 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE_DIR))
 import matplotlib.pyplot as plt
 
 from sigsynth.models import AppConfig
+from sigsynth.numpy_synth import synthesize_sample
 from sigsynth.post_transforms import (
     apply_awgn,
     apply_chirp_flatten,
     apply_complex_to_real_magnitude,
     apply_freq_offset,
     apply_iq_imbalance,
+    apply_random_phase_shift,
+    apply_random_resample,
+    apply_random_time_shift,
+    apply_rayleigh_fading,
     apply_spectrogram,
 )
 from sigsynth.registry import resolve_generator_name
@@ -42,9 +47,26 @@ def _sample_rng(config: AppConfig) -> np.random.Generator:
     return np.random.default_rng(seed=seed)
 
 
-def _make_base_signal(config: AppConfig) -> np.ndarray:
+def _make_base_signal(config: AppConfig, use_demo: bool = False) -> np.ndarray:
+    """Generate base signal - either a real dataset sample or a demo tone.
+
+    Args:
+        config: Application configuration
+        use_demo: If True, generate simple demo tone. If False, generate real dataset sample.
+    """
     sample_len = int(config.global_params.get("sample_len", 1024))
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
+
+    if not use_demo and config.generators:
+        # Generate a real dataset sample (sample_index=0 for repeatability)
+        try:
+            sample = synthesize_sample(config, sample_index=0)
+            return sample.clean.astype(np.complex64)
+        except Exception:
+            # Fall back to demo tone if generation fails
+            pass
+
+    # Demo mode: simple tone or chirp
     center_frequency_hz = float(config.global_params.get("center_frequency_hz", 0.0))
     t = np.arange(sample_len, dtype=float) / sample_rate
     resolved_generators = {resolve_generator_name(name) or name for name in config.generators}
@@ -103,12 +125,29 @@ def apply_preview_transform(name: str, signal: np.ndarray, config: AppConfig) ->
         return _apply_complex_to_real_magnitude(signal)
     if name == "Spectrogram":
         return _apply_spectrogram(signal, config)
+    if name == "RandomPhaseShift":
+        return apply_random_phase_shift(signal, config)
+    if name == "RandomTimeShift":
+        return apply_random_time_shift(signal, config)
+    if name == "RayleighFadingChannel":
+        return apply_rayleigh_fading(signal, config)
+    if name == "RandomResample":
+        return apply_random_resample(signal, config)
     return signal
 
 
-def build_transform_preview(config: AppConfig, transform_names: list[str], max_stages: int = 6) -> list[PreviewStage]:
-    base = _make_base_signal(config)
-    stages = [PreviewStage(name="Clean Tone", data=base, kind="complex")]
+def build_transform_preview(config: AppConfig, transform_names: list[str], max_stages: int = 6, use_demo: bool = False) -> list[PreviewStage]:
+    """Build preview stages showing signal transformations.
+
+    Args:
+        config: Application configuration
+        transform_names: List of transform names to apply
+        max_stages: Maximum number of stages to show
+        use_demo: If True, use demo tone. If False, use real dataset sample.
+    """
+    base = _make_base_signal(config, use_demo=use_demo)
+    label = "Demo Tone" if use_demo else "Clean Signal"
+    stages = [PreviewStage(name=label, data=base, kind="complex")]
     current = base
 
     for name in transform_names[: max_stages - 2]:
@@ -265,6 +304,16 @@ def render_preview_figure(stages: list[PreviewStage], config: AppConfig):
 
             ax.plot(time_axis, data.real[:limit], label="real", linewidth=1.0)
             ax.plot(time_axis, data.imag[:limit], label="imag", linewidth=1.0, alpha=0.8)
+
+            # Set y-axis limits based on actual data range for better visibility
+            real_range = np.ptp(data.real[:limit])
+            imag_range = np.ptp(data.imag[:limit])
+            if real_range > 0 or imag_range > 0:
+                data_min = min(np.min(data.real[:limit]), np.min(data.imag[:limit]))
+                data_max = max(np.max(data.real[:limit]), np.max(data.imag[:limit]))
+                margin = (data_max - data_min) * 0.1
+                ax.set_ylim(data_min - margin, data_max + margin)
+
             ax.set_ylabel("Amplitude")
             ax.set_xlabel(f"Time ({time_unit})")
             ax.legend(loc="upper right", fontsize="small")
@@ -277,6 +326,15 @@ def render_preview_figure(stages: list[PreviewStage], config: AppConfig):
             time_axis = time_s / time_scale
 
             ax.plot(time_axis, data[:limit], color="#2b6cb0", linewidth=1.0)
+
+            # Set y-axis limits based on actual data range for better visibility
+            data_range = np.ptp(data[:limit])
+            if data_range > 0:
+                data_min = np.min(data[:limit])
+                data_max = np.max(data[:limit])
+                margin = (data_max - data_min) * 0.1
+                ax.set_ylim(data_min - margin, data_max + margin)
+
             ax.set_ylabel("Amplitude")
             ax.set_xlabel(f"Time ({time_unit})")
         ax.set_title(stage.name)
