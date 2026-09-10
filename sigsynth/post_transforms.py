@@ -11,6 +11,10 @@ NUMPY_POST_TRANSFORMS = {
     "FreqOffset",
     "IQImbalance",
     "ChirpFlatten",
+    "RandomPhaseShift",
+    "RandomTimeShift",
+    "RayleighFadingChannel",
+    "RandomResample",
 }
 
 
@@ -114,6 +118,79 @@ def apply_spectrogram(signal: np.ndarray, config: AppConfig) -> np.ndarray:
     return magnitude_db.astype(np.float32)
 
 
+def apply_random_phase_shift(signal: np.ndarray, config: AppConfig, sample_index: int = 0) -> np.ndarray:
+    """Apply random phase shift to complex IQ signal (Sig53 level 2: -1 to 1 rad)."""
+    rng = _transform_rng(config, salt=len(signal) * 5, sample_index=sample_index)
+    phase_shift = rng.uniform(-1.0, 1.0)
+    return (signal * np.exp(1j * phase_shift)).astype(np.complex64)
+
+
+def apply_random_time_shift(signal: np.ndarray, config: AppConfig, sample_index: int = 0) -> np.ndarray:
+    """Apply random circular time shift (Sig53 level 2: -32 to 32 samples)."""
+    rng = _transform_rng(config, salt=len(signal) * 7, sample_index=sample_index)
+    shift_samples = int(rng.integers(-32, 33))
+    return np.roll(signal, shift_samples).astype(np.complex64)
+
+
+def apply_rayleigh_fading(signal: np.ndarray, config: AppConfig, sample_index: int = 0) -> np.ndarray:
+    """Apply Rayleigh fading channel (Sig53 level 2: 0.05-0.5 spread, PDP=(1.0, 0.5, 0.1))."""
+    rng = _transform_rng(config, salt=len(signal) * 11, sample_index=sample_index)
+    # Sig53 parameters
+    spread_fraction = rng.uniform(0.05, 0.5)
+    power_delay_profile = np.array([1.0, 0.5, 0.1], dtype=float)
+
+    # Normalize power delay profile
+    power_delay_profile = power_delay_profile / np.sum(power_delay_profile)
+
+    num_taps = len(power_delay_profile)
+    max_delay = max(1, int(spread_fraction * len(signal)))
+
+    # Generate tap delays - ensure first tap is at delay 0 for main signal
+    delays = np.zeros(num_taps, dtype=int)
+    delays[0] = 0  # Main path at zero delay
+    if num_taps > 1:
+        # Subsequent taps spread across the delay range
+        delays[1:] = np.sort(rng.integers(1, max_delay, size=num_taps - 1))
+
+    # Rayleigh distributed gains (complex Gaussian with specified power)
+    gains = np.zeros(num_taps, dtype=np.complex128)
+    for i in range(num_taps):
+        gains[i] = (rng.normal(0, 1) + 1j * rng.normal(0, 1)) * np.sqrt(power_delay_profile[i] / 2)
+
+    # Apply multipath with proper sample alignment
+    output = np.zeros_like(signal, dtype=np.complex128)
+    for delay, gain in zip(delays, gains):
+        if delay == 0:
+            output += gain * signal
+        else:
+            output[delay:] += gain * signal[: len(signal) - delay]
+
+    return output.astype(np.complex64)
+
+
+def apply_random_resample(signal: np.ndarray, config: AppConfig, sample_index: int = 0) -> np.ndarray:
+    """Resample signal by random factor (Sig53 level 2: 0.75-1.5)."""
+    from scipy.signal import resample_poly
+
+    rng = _transform_rng(config, salt=len(signal) * 13, sample_index=sample_index)
+    rate = rng.uniform(0.75, 1.5)
+    target_len = len(signal)
+
+    # Convert rate to rational approximation
+    up = int(rate * 100)
+    down = 100
+
+    resampled = resample_poly(signal, up, down)
+
+    if len(resampled) > target_len:
+        return resampled[:target_len].astype(np.complex64)
+    if len(resampled) < target_len:
+        return np.pad(
+            resampled, (0, target_len - len(resampled)), mode="constant"
+        ).astype(np.complex64)
+    return resampled.astype(np.complex64)
+
+
 def apply_post_transform(
     name: str,
     signal: np.ndarray,
@@ -128,6 +205,14 @@ def apply_post_transform(
         return apply_iq_imbalance(signal, config, sample_index=sample_index)
     if name == "ChirpFlatten":
         return apply_chirp_flatten(signal, config, sample_index=sample_index)
+    if name == "RandomPhaseShift":
+        return apply_random_phase_shift(signal, config, sample_index=sample_index)
+    if name == "RandomTimeShift":
+        return apply_random_time_shift(signal, config, sample_index=sample_index)
+    if name == "RayleighFadingChannel":
+        return apply_rayleigh_fading(signal, config, sample_index=sample_index)
+    if name == "RandomResample":
+        return apply_random_resample(signal, config, sample_index=sample_index)
     if name == "ComplexToRealMagnitude":
         return apply_complex_to_real_magnitude(signal)
     if name == "Spectrogram":
