@@ -5,6 +5,10 @@ import re
 from sigsynth.models import GeneratorMeta, TransformMeta
 
 
+def _normalize_registry_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
 TORCHSIG_CONCRETE_GENERATORS: list[str] = [
     "tone",
     "ofdm-64",
@@ -65,7 +69,70 @@ TORCHSIG_CONCRETE_GENERATORS: list[str] = [
     "am-lsb",
 ]
 
-TORCHSIG_CONCRETE_SET = set(TORCHSIG_CONCRETE_GENERATORS)
+TORCHSIG_CONCRETE_LOOKUP = {
+    _normalize_registry_key(name): name for name in TORCHSIG_CONCRETE_GENERATORS
+}
+TORCHSIG_CONCRETE_SET = set(TORCHSIG_CONCRETE_LOOKUP)
+
+CONCRETE_GENERATOR_CANONICAL_MAP: dict[str, str] = {
+    "tone": "Tone",
+    "bpsk": "BPSK",
+    "qpsk": "QPSK",
+    "8psk": "8PSK",
+    "16psk": "PSK",
+    "32psk": "PSK",
+    "64psk": "PSK",
+    "4ask": "ASK",
+    "8ask": "ASK",
+    "16ask": "ASK",
+    "32ask": "ASK",
+    "64ask": "ASK",
+    "16qam": "QAM16",
+    "32qam": "QAM",
+    "64qam": "QAM64",
+    "256qam": "QAM",
+    "1024qam": "QAM",
+    "32qamcross": "QAM",
+    "128qamcross": "QAM",
+    "512qamcross": "QAM",
+    "2fsk": "FSK",
+    "4fsk": "FSK",
+    "8fsk": "FSK",
+    "16fsk": "FSK",
+    "2gfsk": "GFSK",
+    "4gfsk": "GFSK",
+    "8gfsk": "GFSK",
+    "16gfsk": "GFSK",
+    "2msk": "MSK",
+    "4msk": "MSK",
+    "8msk": "MSK",
+    "16msk": "MSK",
+    "2gmsk": "GMSK",
+    "4gmsk": "GMSK",
+    "8gmsk": "GMSK",
+    "16gmsk": "GMSK",
+    "fm": "FM",
+    "ook": "OOK",
+    "lfmdata": "LFM",
+    "lfmradar": "LFM",
+    "chirpss": "ChirpSS",
+    "amdsb": "AM",
+    "amdsbsc": "AM",
+    "amusb": "AM",
+    "amlsb": "AM",
+    "ofdm64": "OFDM",
+    "ofdm72": "OFDM",
+    "ofdm128": "OFDM",
+    "ofdm180": "OFDM",
+    "ofdm256": "OFDM",
+    "ofdm300": "OFDM",
+    "ofdm512": "OFDM",
+    "ofdm600": "OFDM",
+    "ofdm900": "OFDM",
+    "ofdm1024": "OFDM",
+    "ofdm1200": "OFDM",
+    "ofdm2048": "OFDM",
+}
 
 
 GENERATOR_REGISTRY: dict[str, GeneratorMeta] = {
@@ -223,12 +290,6 @@ TRANSFORM_REGISTRY: dict[str, TransformMeta] = {
         constraints={"incompatible_with": ["chirp_preserving"]},
     ),
 }
-
-
-def _normalize_registry_key(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", name.lower())
-
-
 GENERATOR_ALIASES: dict[str, str] = {
     _normalize_registry_key(name): name for name in GENERATOR_REGISTRY
 }
@@ -246,58 +307,8 @@ def resolve_generator_name(name: str) -> str | None:
     normalized = _normalize_registry_key(name)
     if normalized in GENERATOR_ALIASES:
         return GENERATOR_ALIASES[normalized]
-    concrete_map = {
-        "tone": "Tone",
-        "bpsk": "BPSK",
-        "qpsk": "QPSK",
-        "8psk": "8PSK",
-        "16qam": "QAM16",
-        "64qam": "QAM64",
-        "4ask": "ASK",
-        "8ask": "ASK",
-        "16ask": "ASK",
-        "32ask": "ASK",
-        "64ask": "ASK",
-        "2fsk": "FSK",
-        "4fsk": "FSK",
-        "8fsk": "FSK",
-        "16fsk": "FSK",
-        "2gfsk": "GFSK",
-        "4gfsk": "GFSK",
-        "8gfsk": "GFSK",
-        "16gfsk": "GFSK",
-        "2msk": "MSK",
-        "4msk": "MSK",
-        "8msk": "MSK",
-        "16msk": "MSK",
-        "2gmsk": "GMSK",
-        "4gmsk": "GMSK",
-        "8gmsk": "GMSK",
-        "16gmsk": "GMSK",
-        "fm": "FM",
-        "ook": "OOK",
-        "lfmdata": "LFM",
-        "lfmradar": "LFM",
-        "chirpss": "ChirpSS",
-        "amdsb": "AM",
-        "amdsbsc": "AM",
-        "amusb": "AM",
-        "amlsb": "AM",
-        "ofdm64": "OFDM",
-        "ofdm72": "OFDM",
-        "ofdm128": "OFDM",
-        "ofdm180": "OFDM",
-        "ofdm256": "OFDM",
-        "ofdm300": "OFDM",
-        "ofdm512": "OFDM",
-        "ofdm600": "OFDM",
-        "ofdm900": "OFDM",
-        "ofdm1024": "OFDM",
-        "ofdm1200": "OFDM",
-        "ofdm2048": "OFDM",
-    }
-    if normalized in concrete_map:
-        return concrete_map[normalized]
+    if normalized in CONCRETE_GENERATOR_CANONICAL_MAP:
+        return CONCRETE_GENERATOR_CANONICAL_MAP[normalized]
     if normalized.startswith("ofdm"):
         return "OFDM"
     if normalized.startswith("lfm"):
@@ -306,10 +317,6 @@ def resolve_generator_name(name: str) -> str | None:
         return "ChirpSS"
     if normalized.startswith("am"):
         return "AM"
-    if normalized == "fm":
-        return "FM"
-    if normalized == "ook":
-        return "OOK"
     if normalized.endswith("gmsk"):
         return "GMSK"
     if normalized.endswith("gfsk"):
@@ -336,7 +343,7 @@ def is_torchsig_concrete_generator(name: str) -> bool:
 def to_torchsig_generator_name(name: str) -> str | None:
     normalized = _normalize_registry_key(name)
     if normalized in TORCHSIG_CONCRETE_SET:
-        return normalized
+        return TORCHSIG_CONCRETE_LOOKUP[normalized]
     canonical = resolve_generator_name(name)
     if canonical is None:
         return None
