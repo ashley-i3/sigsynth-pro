@@ -17,6 +17,7 @@ from sigsynth.paths import sanitize_output_dir
 from sigsynth.preview import build_transform_preview, close_preview_figure, render_preview_figure
 from sigsynth.registry import (
     GENERATOR_REGISTRY,
+    SIG53_MODULATIONS,
     TORCHSIG_CONCRETE_GENERATORS,
     is_torchsig_concrete_generator,
     TRANSFORM_REGISTRY,
@@ -271,11 +272,36 @@ TORCHSIG_GENERATOR_GROUPS: list[tuple[str, list[str]]] = [
     ("Tones and chirps", ["tone", "chirpss", "lfm-data", "lfm-radar"]),
     ("OFDM", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.startswith("ofdm-")]),
     ("PSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("psk")]),
+    ("PAM", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("pam")]),
     ("ASK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("ask")]),
     ("QAM", [name for name in TORCHSIG_CONCRETE_GENERATORS if "qam" in name]),
     ("FSK / MSK", [name for name in TORCHSIG_CONCRETE_GENERATORS if name.endswith("fsk") or name.endswith("msk")]),
     ("AM / FM / OOK", ["fm", "ook", "am-dsb", "am-dsb-sc", "am-usb", "am-lsb"]),
 ]
+
+
+def transforms_for_impairment_level(impairment_level: int) -> list[TransformStep]:
+    """Return the transform chain matching a preset's Sig53 impairment level."""
+    if impairment_level >= 2:
+        # Sig53 level 2 impairments
+        return [
+            TransformStep(name="RandomPhaseShift", enabled=True),
+            TransformStep(name="RandomTimeShift", enabled=True),
+            TransformStep(name="FreqOffset", enabled=True),
+            TransformStep(name="RayleighFadingChannel", enabled=True),
+            TransformStep(name="IQImbalance", enabled=True),
+            TransformStep(name="RandomResample", enabled=True),
+            TransformStep(name="AWGN", enabled=True),
+        ]
+    if impairment_level == 0:
+        # Clean: only AWGN at very high SNR (controlled by snr_db range)
+        return [TransformStep(name="AWGN", enabled=True)]
+    # Level 1 or other: basic impairments
+    return [
+        TransformStep(name="FreqOffset", enabled=True),
+        TransformStep(name="IQImbalance", enabled=True),
+        TransformStep(name="AWGN", enabled=True),
+    ]
 
 
 def apply_dataset_preset_to_config(config_obj: AppConfig, preset_name: str) -> None:
@@ -308,6 +334,9 @@ def apply_dataset_preset_to_config(config_obj: AppConfig, preset_name: str) -> N
     config_obj.dataset.split_mode = preset["split_mode"]
     config_obj.dataset.output_format = preset["output_format"]
 
+    # Set transforms based on the preset's Sig53 impairment level.
+    config_obj.transforms = transforms_for_impairment_level(int(preset.get("impairment_level", 0)))
+
 
 def apply_dataset_preset(preset_name: str) -> None:
     apply_dataset_preset_to_config(config, preset_name)
@@ -323,7 +352,8 @@ def build_config_for_dataset_preset(preset_name: str, output_dir: Path, test_mod
     else:
         preset_config.generators = list(config.generators)
     preset_config.generator_overrides = deepcopy(config.generator_overrides)
-    preset_config.transforms = deepcopy(config.transforms)
+    # Transforms are already set from the preset's impairment level by
+    # apply_dataset_preset_to_config above.
 
     # Apply test mode reduction if requested
     total_samples = preset["total_samples"]
@@ -344,12 +374,19 @@ def build_config_for_dataset_preset(preset_name: str, output_dir: Path, test_mod
     return preset_config
 
 
+def official_family_generators(family_name: str | None) -> list[str]:
+    """Generators for a family: the canonical 53 for Sig53, full concrete set otherwise."""
+    if family_name == "Sig53 official set":
+        return list(SIG53_MODULATIONS)
+    return list(TORCHSIG_CONCRETE_GENERATORS)
+
+
 def build_official_family_preview_config(base_config: AppConfig, family_name: str) -> tuple[AppConfig, str]:
     family_preview_preset = OFFICIAL_DATASET_FAMILIES[family_name][0]
     preview_config = deepcopy(base_config)
     apply_dataset_preset_to_config(preview_config, family_preview_preset)
     ensure_lfm_chirp_override(preview_config)
-    preview_config.generators = list(TORCHSIG_CONCRETE_GENERATORS)
+    preview_config.generators = official_family_generators(family_name)
     return preview_config, family_preview_preset
 
 
@@ -550,6 +587,16 @@ def render_remap_form(
         return remaps, False
 
     suggestion_button_key = f"{form_key}::use_suggestions"
+
+    # Button must be BEFORE the form: modifying a widget's session state after the
+    # widget has been instantiated in the same run raises a Streamlit error.
+    if st.button("Use suggestions for all", key=suggestion_button_key, use_container_width=True):
+        for index, legacy_name in enumerate(legacy_names):
+            suggested = suggestion_map.get(legacy_name)
+            target_value = suggested if suggested in options else "<keep unresolved>"
+            st.session_state[f"{form_key}::{index}::{legacy_name}"] = target_value
+        st.rerun()
+
     with st.form(form_key):
         st.caption("Pick replacements for unresolved names to migrate older macros.")
         for index, legacy_name in enumerate(legacy_names):
@@ -564,13 +611,6 @@ def render_remap_form(
                 key=f"{form_key}::{index}::{legacy_name}",
             )
         submitted = st.form_submit_button("Apply remaps")
-
-    if st.button("Use suggestions for all", key=suggestion_button_key, use_container_width=True):
-        for index, legacy_name in enumerate(legacy_names):
-            suggested = suggestion_map.get(legacy_name)
-            target_value = suggested if suggested in options else "<keep unresolved>"
-            st.session_state[f"{form_key}::{index}::{legacy_name}"] = target_value
-        st.rerun()
 
     return remaps, submitted
 
@@ -619,8 +659,15 @@ with right:
     selected_macro = st.selectbox("Available macros", options=["<none>"] + macros)
 
     if st.button("Load macro", use_container_width=True) and selected_macro != "<none>":
-        st.session_state.config = macro_manager.load(selected_macro)
-        seed_length_widget_state(st.session_state.config, force=True)
+        loaded_config = macro_manager.load(selected_macro)
+        st.session_state.config = loaded_config
+        seed_length_widget_state(loaded_config, force=True)
+
+        # Sync grouped generator widget state with the loaded macro's generators.
+        for group_name, group_options in TORCHSIG_GENERATOR_GROUPS:
+            key = f"torchsig_group::{group_name}"
+            st.session_state[key] = [g for g in loaded_config.generators if g in group_options]
+
         st.rerun()
 
     save_name = st.text_input("Save macro as", value="new_macro.yaml")
@@ -894,9 +941,11 @@ with left:
     resolved_generators = []
     unknown_generators = []
     if full_family_mode:
-        selected_generators = list(TORCHSIG_CONCRETE_GENERATORS)
+        # Sig53 official set uses the canonical 53 modulations; Wideband uses the full catalog.
+        selected_generators = official_family_generators(selected_official_family)
+        family_label = "Sig53" if selected_official_family == "Sig53 official set" else "Wideband Sig53"
         st.info(
-            f"Full official family mode is using the full TorchSig concrete generator catalog ({len(selected_generators)} generators)."
+            f"Full official family mode is using the {family_label} generator catalog ({len(selected_generators)} generators)."
         )
         with st.expander("Selected generators", expanded=False):
             st.write(", ".join(selected_generators))
@@ -1193,6 +1242,15 @@ with left:
         st.caption(
             "Demo preview mode is forcing Tone at 44.1 kHz, 66.6 Hz center frequency, 1.0 s duration, 44,100 samples, and seed 666."
         )
+    preview_samples = st.slider(
+        "Preview samples",
+        min_value=64,
+        max_value=4096,
+        value=int(st.session_state.get("preview_samples", 256)),
+        step=64,
+        help="Number of time-domain samples shown in the IQ preview plots.",
+        key="preview_samples",
+    )
     preview_transforms = [step.name for step in config.transforms if step.enabled and step.name in TRANSFORM_REGISTRY]
     if demo_preview_mode:
         if "AWGN" not in preview_transforms:
@@ -1200,13 +1258,18 @@ with left:
         else:
             preview_transforms = ["AWGN", *[name for name in preview_transforms if name != "AWGN"]]
     if preview_transforms:
-        preview_stages = build_transform_preview(preview_config, preview_transforms)
-        st.caption(
-            "Approximate preview built from a clean tone, then the selected preview transforms, then a single spectrogram view that is zoomed to the active band. "
-            "Demo mode injects AWGN once so the tone remains visible in the preview."
-        )
+        preview_stages = build_transform_preview(preview_config, preview_transforms, use_demo=demo_preview_mode)
+        if demo_preview_mode:
+            st.caption(
+                "Approximate preview built from a clean tone, then the selected preview transforms, then a single spectrogram view that is zoomed to the active band. "
+                "Demo mode injects AWGN once so the tone remains visible in the preview."
+            )
+        else:
+            st.caption(
+                "Preview built from a real synthesized dataset sample, then the selected transforms, then a single spectrogram view that is zoomed to the active band."
+            )
         with st.expander("Show preview", expanded=True):
-            preview_figure = render_preview_figure(preview_stages, preview_config)
+            preview_figure = render_preview_figure(preview_stages, preview_config, preview_samples=preview_samples)
             try:
                 st.pyplot(preview_figure, clear_figure=True)
             finally:

@@ -1,4 +1,5 @@
 /output
+/third_party/torchsig_beta
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
