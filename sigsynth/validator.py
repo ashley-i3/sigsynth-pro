@@ -14,6 +14,29 @@ VALID_OUTPUT_FORMATS = {"hdf5", "numpy"}
 VALID_SPLIT_MODES = {"split", "train_only", "val_only"}
 
 
+def _matching_generator_overrides(
+    config: AppConfig,
+    generator_name: str,
+    canonical_generator_name: str,
+) -> list[dict[str, object]]:
+    matching: list[dict[str, object]] = []
+    seen_keys: set[str] = set()
+
+    for candidate_key in (generator_name, canonical_generator_name):
+        override = config.generator_overrides.get(candidate_key)
+        if isinstance(override, dict) and candidate_key not in seen_keys:
+            matching.append(override)
+            seen_keys.add(candidate_key)
+
+    for key, override in config.generator_overrides.items():
+        if key in seen_keys or not isinstance(override, dict):
+            continue
+        if resolve_generator_name(key) == canonical_generator_name:
+            matching.append(override)
+
+    return matching
+
+
 def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -41,27 +64,28 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
         if not meta:
             errors.append(f"Generator '{generator_name}' is not registered.")
             continue
+        matching_overrides = _matching_generator_overrides(
+            config,
+            generator_name,
+            canonical_generator_name,
+        )
         for group in meta.parameter_groups:
-            has_group = group in config.global_params or group in config.generator_overrides.get(canonical_generator_name, {})
+            has_group = group in config.global_params or any(
+                group in override for override in matching_overrides
+            )
             if not has_group:
                 errors.append(f"Generator '{generator_name}' requires parameter group '{group}'.")
 
     enabled_transforms = [step for step in config.transforms if step.enabled]
     if config.generators and enabled_transforms:
         current_types = set()
+        registered_generator_tags: set[str] = set()
         for name in config.generators:
             canonical_generator_name = resolve_generator_name(name) or name
             generator = GENERATOR_REGISTRY.get(canonical_generator_name)
             if generator:
                 current_types.update(generator.produces)
-
-        generator_tags = {
-            tag
-            for name in config.generators
-            for tag in GENERATOR_REGISTRY.get(
-                resolve_generator_name(name) or name, GENERATOR_REGISTRY["BPSK"]
-            ).tags
-        }
+                registered_generator_tags.update(generator.tags)
 
         for step in enabled_transforms:
             canonical_transform_name = resolve_transform_name(step.name) or step.name
@@ -74,11 +98,12 @@ def validate_config(config: AppConfig) -> tuple[list[str], list[str]]:
                 errors.append(
                     f"Transform '{step.name}' expects {transform.accepts} but pipeline currently has {sorted(current_types)}."
                 )
-            else:
-                current_types = set(transform.produces)
+                break
+
+            current_types = set(transform.produces)
 
             incompatible_tags = set(transform.constraints.get("incompatible_with", []))
-            conflicting = incompatible_tags.intersection(generator_tags)
+            conflicting = incompatible_tags.intersection(registered_generator_tags)
             if conflicting:
                 warnings.append(
                     f"Transform '{step.name}' is incompatible with generator tags: {sorted(conflicting)}."

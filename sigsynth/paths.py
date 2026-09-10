@@ -34,7 +34,12 @@ def sanitize_output_dir(output_dir: str | Path, base_dir: str | Path = "output")
 
         # Check if path is in allowed data directories
         for allowed_dir in ALLOWED_DATA_DIRS:
-            if resolved == allowed_dir or allowed_dir in resolved.parents:
+            if resolved == allowed_dir:
+                raise ValueError(
+                    "Dataset output directory must use a subdirectory inside /data1, /data2, or /data3; "
+                    "writing to the mount root is not allowed."
+                )
+            if allowed_dir in resolved.parents:
                 # Path is in allowed directory, return it
                 return resolved
 

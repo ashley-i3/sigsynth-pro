@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -57,13 +57,37 @@ class AppConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AppConfig":
-        transform_objs = [TransformStep(**step) for step in payload.get("transforms", [])]
-        dataset = DatasetConfig(**payload.get("dataset", {}))
+        transforms_payload = payload.get("transforms", [])
+        transform_field_names = {field.name for field in fields(TransformStep)}
+        transform_objs: list[TransformStep] = []
+        for step in transforms_payload if isinstance(transforms_payload, list) else []:
+            if isinstance(step, str):
+                transform_objs.append(TransformStep(name=step))
+                continue
+            if isinstance(step, dict):
+                filtered_step = {
+                    key: value for key, value in step.items() if key in transform_field_names
+                }
+                if "name" in filtered_step:
+                    transform_objs.append(TransformStep(**filtered_step))
+
+        dataset_payload = payload.get("dataset", {})
+        dataset_field_names = {field.name for field in fields(DatasetConfig)}
+        filtered_dataset = {
+            key: value for key, value in dataset_payload.items() if key in dataset_field_names
+        } if isinstance(dataset_payload, dict) else {}
+        dataset = DatasetConfig(**filtered_dataset)
+
+        generators_payload = payload.get("generators", [])
+        generator_overrides_payload = payload.get("generator_overrides", {})
+        global_params_payload = payload.get("global_params", {})
         return cls(
             schema_version=payload.get("schema_version", "1.0"),
-            generators=payload.get("generators", []),
-            global_params=payload.get("global_params", {}),
-            generator_overrides=payload.get("generator_overrides", {}),
+            generators=generators_payload if isinstance(generators_payload, list) else [],
+            global_params=global_params_payload if isinstance(global_params_payload, dict) else {},
+            generator_overrides=(
+                generator_overrides_payload if isinstance(generator_overrides_payload, dict) else {}
+            ),
             transforms=transform_objs,
             dataset=dataset,
         )
