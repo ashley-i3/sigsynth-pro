@@ -5,11 +5,16 @@ from pathlib import Path
 
 import streamlit as st
 
-from sigsynth.generator import build_dataset_zip_bytes, generate_dataset
+from sigsynth.generator import (
+    build_dataset_zip_bytes,
+    compute_directory_size_bytes,
+    generate_dataset,
+    result_output_dir,
+)
 from sigsynth.macro_manager import MacroManager
 from sigsynth.models import AppConfig, DatasetConfig, TransformStep
 from sigsynth.paths import sanitize_output_dir
-from sigsynth.preview import build_transform_preview, render_preview_figure
+from sigsynth.preview import build_transform_preview, close_preview_figure, render_preview_figure
 from sigsynth.registry import (
     GENERATOR_REGISTRY,
     TORCHSIG_CONCRETE_GENERATORS,
@@ -44,6 +49,8 @@ if "download_zip" not in st.session_state:
     st.session_state.download_zip = None
 if "download_name" not in st.session_state:
     st.session_state.download_name = "dataset.zip"
+if "download_source_dir" not in st.session_state:
+    st.session_state.download_source_dir = None
 
 config: AppConfig = st.session_state.config
 
@@ -271,13 +278,13 @@ TORCHSIG_GENERATOR_GROUPS: list[tuple[str, list[str]]] = [
 ]
 
 
-def apply_dataset_preset(preset_name: str) -> None:
+def apply_dataset_preset_to_config(config_obj: AppConfig, preset_name: str) -> None:
     preset = DATASET_PRESETS.get(preset_name)
     if not preset:
-        config.global_params["dataset_preset"] = "Custom"
+        config_obj.global_params["dataset_preset"] = "Custom"
         return
 
-    config.global_params.update(
+    config_obj.global_params.update(
         {
             "dataset_preset": preset_name,
             "seed": preset["seed"],
@@ -296,37 +303,25 @@ def apply_dataset_preset(preset_name: str) -> None:
         }
     )
     if "cochannel_overlap_probability" in preset:
-        config.global_params["cochannel_overlap_probability"] = preset["cochannel_overlap_probability"]
-    config.dataset.total_samples = preset["total_samples"]
-    config.dataset.split_mode = preset["split_mode"]
-    config.dataset.output_format = preset["output_format"]
+        config_obj.global_params["cochannel_overlap_probability"] = preset["cochannel_overlap_probability"]
+    config_obj.dataset.total_samples = preset["total_samples"]
+    config_obj.dataset.split_mode = preset["split_mode"]
+    config_obj.dataset.output_format = preset["output_format"]
+
+
+def apply_dataset_preset(preset_name: str) -> None:
+    apply_dataset_preset_to_config(config, preset_name)
     seed_length_widget_state(config, force=True)
 
 
 def build_config_for_dataset_preset(preset_name: str, output_dir: Path, test_mode: bool = False) -> AppConfig:
     preset = DATASET_PRESETS[preset_name]
     preset_config = deepcopy(st.session_state.config)
-    preset_config.global_params.update(
-        {
-            "dataset_preset": preset_name,
-            "seed": preset["seed"],
-            "sample_rate": preset["sample_rate"],
-            "center_frequency_hz": preset["center_frequency_hz"],
-            "duration": preset["duration"],
-            "snr_db": preset["snr_db"],
-            "sample_len": preset["sample_len"],
-            "class_list": preset["class_list"],
-            "class_distribution": preset["class_distribution"],
-            "num_signals_min": preset["num_signals_min"],
-            "num_signals_max": preset["num_signals_max"],
-            "impairment_level": preset["impairment_level"],
-            "eb_no": preset["eb_no"],
-            "generator_catalog": preset["generator_catalog"],
-        }
-    )
-    if "cochannel_overlap_probability" in preset:
-        preset_config.global_params["cochannel_overlap_probability"] = preset["cochannel_overlap_probability"]
-    preset_config.generators = list(config.generators)
+    apply_dataset_preset_to_config(preset_config, preset_name)
+    if preset["generator_catalog"] == "TorchSig concrete labels":
+        preset_config.generators = list(TORCHSIG_CONCRETE_GENERATORS)
+    else:
+        preset_config.generators = list(config.generators)
     preset_config.generator_overrides = deepcopy(config.generator_overrides)
     preset_config.transforms = deepcopy(config.transforms)
 
@@ -344,9 +339,46 @@ def build_config_for_dataset_preset(preset_name: str, output_dir: Path, test_mod
         create_batch_size=config.dataset.create_batch_size,
         create_num_workers=config.dataset.create_num_workers,
         max_memory_mb=config.dataset.max_memory_mb,
-        compression_level=getattr(config.dataset, "compression_level", 6),
+        compression_level=int(getattr(config.dataset, "compression_level", 0)),
     )
     return preset_config
+
+
+def build_official_family_preview_config(base_config: AppConfig, family_name: str) -> tuple[AppConfig, str]:
+    family_preview_preset = OFFICIAL_DATASET_FAMILIES[family_name][0]
+    preview_config = deepcopy(base_config)
+    apply_dataset_preset_to_config(preview_config, family_preview_preset)
+    ensure_lfm_chirp_override(preview_config)
+    preview_config.generators = list(TORCHSIG_CONCRETE_GENERATORS)
+    return preview_config, family_preview_preset
+
+
+def normalize_generation_output_dir(output_dir: str) -> str:
+    clean_output_dir = output_dir.rstrip("/").rstrip("\\")
+    if clean_output_dir.endswith("_test"):
+        clean_output_dir = clean_output_dir[:-5]
+    return clean_output_dir
+
+
+def output_dir_for_generation(output_dir: str, test_mode: bool = False) -> str:
+    clean_output_dir = normalize_generation_output_dir(output_dir)
+    return f"{clean_output_dir}_test" if test_mode else clean_output_dir
+
+
+def resolve_generation_target_output_dir(
+    generation_scope: str,
+    dataset_output_dir: str,
+    selected_dataset_preset: str,
+    selected_official_family: str | None,
+    test_mode: bool = False,
+) -> Path:
+    base_root = sanitize_output_dir(output_dir_for_generation(dataset_output_dir, test_mode))
+    if generation_scope == "Full official family":
+        family_name = selected_official_family or "Sig53 official set"
+        return base_root / OFFICIAL_DATASET_FAMILY_SLUGS[family_name]
+    if generation_scope == "Paired official split" and selected_dataset_preset in DATASET_PRESET_PAIRS:
+        return base_root / DATASET_PRESET_PAIRS[selected_dataset_preset][1]
+    return base_root
 
 
 def _default_frequency_unit(sample_rate_hz: int) -> str:
@@ -380,12 +412,14 @@ def seed_length_widget_state(config_obj: AppConfig, force: bool = False) -> None
     sample_rate_hz = int(config_obj.global_params.get("sample_rate", 1_000_000))
     frequency_unit = _default_frequency_unit(sample_rate_hz)
     frequency_scale = FREQUENCY_UNITS[frequency_unit]
+    seed_value = config_obj.global_params.get("seed")
     defaults = {
         "frequency_unit": frequency_unit,
         LENGTH_WIDGET_KEYS["sample_rate_hz"]: sample_rate_hz,
         LENGTH_WIDGET_KEYS["sample_rate_display"]: sample_rate_hz / frequency_scale,
         LENGTH_WIDGET_KEYS["duration"]: float(config_obj.global_params.get("duration", 0.001024)),
         LENGTH_WIDGET_KEYS["sample_len"]: int(config_obj.global_params.get("sample_len", 1024)),
+        "global_seed": int(seed_value) if seed_value is not None else 123456789,
     }
     for key, value in defaults.items():
         if force or key not in st.session_state:
@@ -442,10 +476,33 @@ def build_demo_preview_config(base_config: AppConfig) -> AppConfig:
     return demo_config
 
 
+def compute_split_counts(total_samples: int, train_ratio: float, split_mode: str) -> tuple[int, int]:
+    if split_mode == "train_only":
+        return total_samples, 0
+    if split_mode == "val_only":
+        return 0, total_samples
+
+    train_count = int(total_samples * train_ratio)
+    return train_count, total_samples - train_count
+
+
 def ensure_lfm_chirp_override(config_obj: AppConfig) -> None:
     sample_rate = int(config_obj.global_params.get("sample_rate", 1_000_000))
     chirp = config_obj.generator_overrides.setdefault("LFM", {}).setdefault("chirp", {})
     chirp.setdefault("sweep_hz", max(1_000, sample_rate // 4))
+
+
+def prepare_download(output_dir: str | Path, default_name: str) -> None:
+    output_path = Path(output_dir)
+    st.session_state.download_name = default_name
+    st.session_state.download_source_dir = str(output_path)
+
+    directory_size_bytes = compute_directory_size_bytes(output_path)
+    if directory_size_bytes >= 1024**3:
+        st.session_state.download_zip = None
+        return
+
+    st.session_state.download_zip = build_dataset_zip_bytes(output_path)
 
 
 seed_length_widget_state(config)
@@ -469,6 +526,16 @@ def generate_official_family_set(family_name: str, base_output_dir: Path, test_m
         preset_root = family_root / preset_name.lower().replace(" ", "_")
         results.append((preset_name, generate_dataset(build_config_for_dataset_preset(preset_name, preset_root, test_mode))))
     return results, family_root
+
+
+def build_single_run_config(base_config: AppConfig, test_mode: bool = False) -> AppConfig:
+    run_config = deepcopy(base_config)
+    if not test_mode:
+        return run_config
+
+    run_config.dataset.output_dir = output_dir_for_generation(run_config.dataset.output_dir, test_mode=True)
+    run_config.dataset.total_samples = max(100, int(run_config.dataset.total_samples * 0.1))
+    return run_config
 
 
 def render_remap_form(
@@ -576,6 +643,7 @@ with right:
         options=["Single split", "Paired official split", "Full official family"],
         horizontal=True,
     )
+    full_family_mode = generation_scope == "Full official family"
     st.caption(
         "Single split generates just the selected preset. Paired official split generates the selected split plus its companion. "
         "Full official family generates every official split in the chosen Sig53 or Wideband family. "
@@ -593,16 +661,11 @@ with right:
     if selected_dataset_preset != current_dataset_preset:
         apply_dataset_preset(selected_dataset_preset)
         current_dataset_preset = selected_dataset_preset
-    if selected_dataset_preset != "Custom":
-        preset = DATASET_PRESETS[selected_dataset_preset]
-        st.caption(
-            f"Applied official split preset: seed `{preset['seed']}`, "
-            f"samples `{preset['total_samples']}`, split mode `{preset['split_mode']}`."
-        )
-        st.caption("Preset fields are locked; switch back to Custom to edit them manually.")
     selected_official_family = None
     family_presets: list[str] = []
-    if generation_scope == "Full official family":
+    family_preview_config = None
+    family_preview_preset = None
+    if full_family_mode:
         family_default = "Sig53 official set"
         if selected_dataset_preset in OFFICIAL_DATASET_FAMILIES["Wideband Sig53 official set"]:
             family_default = "Wideband Sig53 official set"
@@ -613,13 +676,11 @@ with right:
             options=list(OFFICIAL_DATASET_FAMILIES.keys()),
             index=list(OFFICIAL_DATASET_FAMILIES.keys()).index(family_default),
         )
+        family_preview_config, family_preview_preset = build_official_family_preview_config(
+            config,
+            selected_official_family,
+        )
         family_presets = OFFICIAL_DATASET_FAMILIES[selected_official_family]
-        family_preview_preset = family_presets[0]
-        if config.global_params.get("dataset_preset") != family_preview_preset:
-            apply_dataset_preset(family_preview_preset)
-        ensure_lfm_chirp_override(config)
-        if config.generators != list(TORCHSIG_CONCRETE_GENERATORS):
-            config.generators = list(TORCHSIG_CONCRETE_GENERATORS)
         st.info(
             "This will generate every split in the family below. Each split gets its own directory with a single HDF5 file "
             "(HDF5 is hierarchical internally, not a directory tree). All splits will be written to the output directory on disk. "
@@ -638,21 +699,34 @@ with right:
                     f"- {preset_name}: {preset['total_samples']} samples, "
                     f"{preset['split_mode']}, seed {preset['seed']}"
                 )
-    preset_locked = selected_dataset_preset != "Custom" or generation_scope == "Full official family"
+    active_dataset_preset = family_preview_preset or selected_dataset_preset
+    active_config = family_preview_config or config
+    family_preview_token = f"family::{family_preview_preset}" if family_preview_preset else None
+    if st.session_state.get("official_family_preview_token") != family_preview_token:
+        seed_length_widget_state(active_config if full_family_mode else config, force=True)
+        st.session_state["official_family_preview_token"] = family_preview_token
+    if active_dataset_preset != "Custom":
+        preset = DATASET_PRESETS[active_dataset_preset]
+        st.caption(
+            f"Applied official split preset: seed `{preset['seed']}`, "
+            f"samples `{preset['total_samples']}`, split mode `{preset['split_mode']}`."
+        )
+        st.caption("Preset fields are locked; switch back to Custom to edit them manually.")
+    preset_locked = active_dataset_preset != "Custom" or full_family_mode
 
     output_format_label = st.radio(
         "Output format",
         options=["TorchSig-compatible HDF5", "NumPy split folders"],
-        index=0 if config.dataset.output_format == "hdf5" else 1,
+        index=0 if active_config.dataset.output_format == "hdf5" else 1,
         horizontal=True,
         disabled=preset_locked,
     )
-    if selected_dataset_preset == "Custom":
+    if active_dataset_preset == "Custom":
         config.dataset.output_format = "hdf5" if output_format_label == "TorchSig-compatible HDF5" else "numpy"
-    generator_catalog_default = config.global_params.get(
+    generator_catalog_default = active_config.global_params.get(
         "generator_catalog",
         "TorchSig concrete labels"
-        if any(is_torchsig_concrete_generator(name) for name in config.generators)
+        if any(is_torchsig_concrete_generator(name) for name in active_config.generators)
         else "Simplified families",
     )
     generator_catalog = st.radio(
@@ -662,25 +736,26 @@ with right:
         horizontal=True,
         disabled=preset_locked,
     )
-    if selected_dataset_preset == "Custom":
+    if active_dataset_preset == "Custom":
         config.global_params["generator_catalog"] = generator_catalog
     total_samples = st.number_input(
         "Total samples",
         min_value=1,
-        value=config.dataset.total_samples,
+        value=active_config.dataset.total_samples,
         disabled=preset_locked,
     )
     split_mode = st.radio(
         "Split mode",
         options=["split", "train_only", "val_only"],
-        index=["split", "train_only", "val_only"].index(config.dataset.split_mode)
-        if config.dataset.split_mode in {"split", "train_only", "val_only"}
+        index=["split", "train_only", "val_only"].index(active_config.dataset.split_mode)
+        if active_config.dataset.split_mode in {"split", "train_only", "val_only"}
         else 0,
         horizontal=True,
         help="Split mode controls whether NumPy output is split into train/val folders or written as a single train-only / val-only partition.",
         disabled=preset_locked,
     )
-    config.dataset.split_mode = split_mode
+    if not full_family_mode:
+        config.dataset.split_mode = split_mode
     if split_mode == "split":
         train_ratio = st.slider(
             "Train ratio",
@@ -691,8 +766,9 @@ with right:
             disabled=preset_locked,
         )
     else:
-        train_ratio = float(config.dataset.train_ratio)
+        train_ratio = float(active_config.dataset.train_ratio)
         st.caption("Train ratio is ignored outside split mode.")
+    full_train_count, full_val_count = compute_split_counts(int(total_samples), float(train_ratio), split_mode)
     output_dir = st.text_input("Output directory", value=config.dataset.output_dir)
 
     st.caption("**Data creation performance settings**")
@@ -759,14 +835,14 @@ with right:
             with col1:
                 st.caption(f"**Test split:** {test_train:,} train + {test_val:,} val")
             with col2:
-                st.caption(f"**Full split:** {train_count:,} train + {val_count:,} val")
+                st.caption(f"**Full split:** {full_train_count:,} train + {full_val_count:,} val")
         elif split_mode == "train_only":
             st.caption(f"**Test:** {test_sample_count:,} train samples | **Full:** {int(total_samples):,} train samples")
         elif split_mode == "val_only":
             st.caption(f"**Test:** {test_sample_count:,} val samples | **Full:** {int(total_samples):,} val samples")
 
-    current_seed = config.global_params.get("seed")
-    if selected_dataset_preset == "Custom":
+    current_seed = active_config.global_params.get("seed")
+    if active_dataset_preset == "Custom":
         seed_preset = next(
             (label for label, preset_seed in SEED_PRESETS.items() if preset_seed == current_seed),
             "Custom",
@@ -781,46 +857,49 @@ with right:
             st.caption("Use the global seed control to set a custom value.")
         else:
             config.global_params["seed"] = int(preset_seed)
+            st.session_state["global_seed"] = int(preset_seed)
             st.caption(f"Using preset seed `{preset_seed}` from the original TorchSig settings.")
     else:
-        seed = int(config.global_params.get("seed", 1234567890))
+        seed = int(active_config.global_params.get("seed", 1234567890))
         st.caption(f"Using dataset preset seed `{seed}` from the original TorchSig settings.")
 
-    # Apply test run mode if enabled
-    # Strip any existing _test suffix to prevent multiple appends
-    base_output_dir = output_dir.rstrip("/").rstrip("\\")
-    if base_output_dir.endswith("_test"):
-        base_output_dir = base_output_dir[:-5]
+    base_output_dir = normalize_generation_output_dir(output_dir)
 
-    # Always save original values to config - test mode reduction happens at generation time only
+    dataset_total_samples = config.dataset.total_samples if full_family_mode else int(total_samples)
+    dataset_train_ratio = config.dataset.train_ratio if full_family_mode else float(train_ratio)
+    dataset_output_format = (
+        config.dataset.output_format
+        if full_family_mode
+        else ("hdf5" if output_format_label == "TorchSig-compatible HDF5" else "numpy")
+    )
+    dataset_split_mode = config.dataset.split_mode if full_family_mode else split_mode
+
     config.dataset = DatasetConfig(
-        total_samples=int(total_samples),  # Always save original, not reduced
-        train_ratio=float(train_ratio),
-        output_dir=base_output_dir,  # Always save base dir without _test
-        output_format="hdf5" if output_format_label == "TorchSig-compatible HDF5" else "numpy",
-        split_mode=split_mode,
+        total_samples=dataset_total_samples,
+        train_ratio=dataset_train_ratio,
+        output_dir=base_output_dir,
+        output_format=dataset_output_format,
+        split_mode=dataset_split_mode,
         create_batch_size=int(create_batch_size),
         create_num_workers=int(create_num_workers),
         max_memory_mb=int(max_memory_gb * 1024) if max_memory_gb > 0 else None,
         compression_level=int(compression_level),
     )
-    if selected_dataset_preset != "Custom":
-        config.dataset.output_format = DATASET_PRESETS[selected_dataset_preset]["output_format"]
+    if not full_family_mode and active_dataset_preset != "Custom":
+        config.dataset.output_format = DATASET_PRESETS[active_dataset_preset]["output_format"]
 
 with left:
     st.subheader("1) Generators")
     generator_catalog = config.global_params.get("generator_catalog", "Simplified families")
     resolved_generators = []
     unknown_generators = []
-    full_family_mode = generation_scope == "Full official family"
     if full_family_mode:
         selected_generators = list(TORCHSIG_CONCRETE_GENERATORS)
-        config.generators = selected_generators
         st.info(
-            f"Full official family mode is using the full TorchSig concrete generator catalog ({len(config.generators)} generators)."
+            f"Full official family mode is using the full TorchSig concrete generator catalog ({len(selected_generators)} generators)."
         )
         with st.expander("Selected generators", expanded=False):
-            st.write(", ".join(config.generators))
+            st.write(", ".join(selected_generators))
         st.caption("The family preset controls generators in this mode.")
     elif generator_catalog == "TorchSig concrete labels":
         for name in config.generators:
@@ -894,15 +973,16 @@ with left:
         if generator_remaps_applied and unknown_generators:
             st.success("Applied generator remaps.")
 
-    config.generators = selected_generators
+    if not full_family_mode:
+        config.generators = selected_generators
     if st.session_state.get("demo_preview_mode", False) and selected_generators != ["Tone"]:
         st.session_state["demo_preview_mode"] = False
         st.rerun()
 
     st.subheader("2) Global parameters")
-    selected_generator_families = {resolve_generator_name(name) or name for name in config.generators}
+    selected_generator_families = {resolve_generator_name(name) or name for name in selected_generators}
     default_frequency_unit = "MHz"
-    current_sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
+    current_sample_rate = int(active_config.global_params.get("sample_rate", 1_000_000))
     if current_sample_rate >= 1_000_000_000:
         default_frequency_unit = "GHz"
     elif current_sample_rate >= 1_000_000:
@@ -936,7 +1016,7 @@ with left:
     sample_rate = int(round(float(st.session_state[LENGTH_WIDGET_KEYS["sample_rate_display"]]) * frequency_scale))
     st.session_state[LENGTH_WIDGET_KEYS["sample_rate_hz"]] = sample_rate
 
-    center_frequency_default = float(config.global_params.get("center_frequency_hz", 0))
+    center_frequency_default = float(active_config.global_params.get("center_frequency_hz", 0))
     center_frequency_limit = sample_rate / 2.0
     center_frequency_default = max(-center_frequency_limit, min(center_frequency_default, center_frequency_limit))
     center_frequency_display = center_frequency_default / frequency_scale
@@ -959,11 +1039,19 @@ with left:
         args=("duration",),
         disabled=preset_locked,
     )
+    snr_range = active_config.global_params.get("snr_db", [0, 30])
+    if isinstance(snr_range, (list, tuple)) and len(snr_range) >= 2:
+        snr_default_min = int(snr_range[0])
+        snr_default_max = int(snr_range[1])
+    else:
+        snr_default_min, snr_default_max = 0, 30
+    if snr_default_min > snr_default_max:
+        snr_default_min, snr_default_max = snr_default_max, snr_default_min
     snr_min, snr_max = st.slider(
         "SNR range (dB)",
-        min_value=-20,
-        max_value=60,
-        value=tuple(config.global_params.get("snr_db", [0, 30])),
+        min_value=min(-20, snr_default_min),
+        max_value=max(100, snr_default_max),
+        value=(snr_default_min, snr_default_max),
         disabled=preset_locked,
     )
     sample_len = st.number_input(
@@ -975,7 +1063,7 @@ with left:
         args=("sample_len",),
         disabled=preset_locked,
     )
-    seed_value = config.global_params.get("seed")
+    seed_value = active_config.global_params.get("seed")
     seed = st.number_input(
         "Seed",
         value=int(seed_value) if seed_value is not None else 123456789,
@@ -989,50 +1077,56 @@ with left:
         "Center frequency range (fraction of Fs)",
         min_value=0.05,
         max_value=0.5,
-        value=float(config.global_params.get("signal_center_freq_range_factor", 0.16)),
+        value=float(active_config.global_params.get("signal_center_freq_range_factor", 0.16)),
         step=0.01,
         help="Uniform range for signal center frequencies as fraction of sample rate. Original Sig53 used 0.16 (±1.6 MHz for 10 MHz sample rate).",
         disabled=preset_locked,
     )
 
-    config.global_params.update(
-        {
-            "sample_rate": int(sample_rate),
-            "center_frequency_hz": int(center_frequency_hz),
-            "duration": float(st.session_state[LENGTH_WIDGET_KEYS["duration"]]),
-            "snr_db": [int(snr_min), int(snr_max)],
-            "sample_len": int(st.session_state[LENGTH_WIDGET_KEYS["sample_len"]]),
-            "seed": int(seed),
-            "signal_center_freq_range_factor": float(center_freq_range_factor),
-        }
-    )
+    if not full_family_mode:
+        config.global_params.update(
+            {
+                "sample_rate": int(sample_rate),
+                "center_frequency_hz": int(center_frequency_hz),
+                "duration": float(st.session_state[LENGTH_WIDGET_KEYS["duration"]]),
+                "snr_db": [int(snr_min), int(snr_max)],
+                "sample_len": int(st.session_state[LENGTH_WIDGET_KEYS["sample_len"]]),
+                "seed": int(seed),
+                "signal_center_freq_range_factor": float(center_freq_range_factor),
+            }
+        )
 
     if "LFM" in selected_generator_families:
         st.info("LFM selected: chirp parameters are required.")
         # LFM parameters are locked in "Full official family" mode to preserve canonical datasets
         lfm_locked = generation_scope == "Full official family"
+        lfm_sweep_default = int(
+            active_config.generator_overrides.get("LFM", {}).get("chirp", {}).get("sweep_hz", 50_000)
+        )
         sweep_hz = st.number_input(
             "LFM sweep bandwidth (Hz)",
             min_value=1_000,
-            value=50_000,
+            value=lfm_sweep_default,
             disabled=lfm_locked,
             help="Locked in 'Full official family' mode to preserve canonical datasets." if lfm_locked else None,
         )
-        config.generator_overrides.setdefault("LFM", {})["chirp"] = {"sweep_hz": int(sweep_hz)}
+        if not full_family_mode:
+            config.generator_overrides.setdefault("LFM", {})["chirp"] = {"sweep_hz": int(sweep_hz)}
 
     st.subheader("3) Transform pipeline")
     st.caption(
         "These transforms are post-generation augmentations, not TorchSig impairments. "
         "They are previewed for every backend, but only applied to NumPy output when enabled."
     )
+    active_output_format = active_config.dataset.output_format if full_family_mode else config.dataset.output_format
     apply_post_transforms = st.checkbox(
         "Apply post-generation transforms to NumPy output",
-        value=bool(config.global_params.get("apply_post_transforms", config.dataset.output_format == "numpy")),
-        disabled=config.dataset.output_format != "numpy" or preset_locked and generation_scope == "Full official family",
+        value=bool(config.global_params.get("apply_post_transforms", active_output_format == "numpy")),
+        disabled=active_output_format != "numpy" or preset_locked,
         help="When enabled, the supported post-generation transforms are applied to the NumPy fallback output only.",
     )
     config.global_params["apply_post_transforms"] = bool(apply_post_transforms)
-    if config.dataset.output_format != "numpy":
+    if active_output_format != "numpy":
         st.caption("TorchSig-compatible HDF5 generation does not apply the post-generation transform chain.")
     transform_options = sorted(TRANSFORM_REGISTRY.keys())
     resolved_transforms = []
@@ -1086,7 +1180,14 @@ with left:
         help="When enabled, the preview is forced to a 66.6 Hz tone demo with a 44.1 kHz sample rate, 44,100 samples, 1.0 second duration, band center at 66.6 Hz, and seed 666.",
         key="demo_preview_mode",
     )
-    preview_config = config
+    preview_config = (
+        build_official_family_preview_config(
+            config,
+            selected_official_family or "Sig53 official set",
+        )[0]
+        if full_family_mode
+        else config
+    )
     if demo_preview_mode:
         preview_config = build_demo_preview_config(config)
         st.caption(
@@ -1105,31 +1206,51 @@ with left:
             "Demo mode injects AWGN once so the tone remains visible in the preview."
         )
         with st.expander("Show preview", expanded=True):
-            st.pyplot(render_preview_figure(preview_stages, preview_config), clear_figure=True)
+            preview_figure = render_preview_figure(preview_stages, preview_config)
+            try:
+                st.pyplot(preview_figure, clear_figure=True)
+            finally:
+                close_preview_figure(preview_figure)
     else:
         st.info("Add at least one recognized transform to see a live preview.")
 
+effective_config = (
+    build_official_family_preview_config(
+        config,
+        selected_official_family or "Sig53 official set",
+    )[0]
+    if full_family_mode
+    else config
+)
 output_dir_error = None
-safe_output_dir = None
+target_output_dir = None
 try:
-    safe_output_dir = sanitize_output_dir(config.dataset.output_dir)
+    target_output_dir = resolve_generation_target_output_dir(
+        generation_scope,
+        effective_config.dataset.output_dir,
+        selected_dataset_preset,
+        selected_official_family,
+        test_run_mode,
+    )
 except ValueError as exc:
     output_dir_error = str(exc)
 
-errors, warnings = validate_config(config)
-if config.dataset.split_mode == "train_only":
-    train_count, val_count = config.dataset.total_samples, 0
-elif config.dataset.split_mode == "val_only":
-    train_count, val_count = 0, config.dataset.total_samples
-else:
-    train_count = int(config.dataset.total_samples * config.dataset.train_ratio)
-    val_count = config.dataset.total_samples - train_count
-split_has_zero_partition = config.dataset.split_mode == "split" and (
+errors, warnings = validate_config(effective_config)
+train_count, val_count = compute_split_counts(
+    int(effective_config.dataset.total_samples),
+    float(effective_config.dataset.train_ratio),
+    str(effective_config.dataset.split_mode),
+)
+split_has_zero_partition = effective_config.dataset.split_mode == "split" and (
     train_count == 0 or val_count == 0
 )
 output_dir_non_empty = False
-if safe_output_dir is not None:
-    output_dir_non_empty = safe_output_dir.exists() and safe_output_dir.is_dir() and any(safe_output_dir.iterdir())
+if target_output_dir is not None:
+    output_dir_non_empty = (
+        target_output_dir.exists()
+        and target_output_dir.is_dir()
+        and any(target_output_dir.iterdir())
+    )
 
 st.subheader("Validation")
 if warnings:
@@ -1146,7 +1267,7 @@ if not errors and not output_dir_error:
 confirm_non_empty_output = True
 if output_dir_non_empty:
     st.warning(
-        "Output directory is not empty. Files that are not overwritten can taint your dataset unexpectedly."
+        f"Generation target `{target_output_dir}` is not empty. Files that are not overwritten can taint your dataset unexpectedly."
     )
     confirm_non_empty_output = st.checkbox(
         "I understand and want to generate into this non-empty directory.",
@@ -1172,20 +1293,14 @@ if generation_scope == "Full official family":
     family_generate_disabled = bool(errors) or bool(output_dir_error) or not confirm_non_empty_output
     family_button_label = "Generate full official family set (test 10%)" if test_run_mode else "Generate full official family set"
     if st.button(family_button_label, type="primary", disabled=family_generate_disabled):
-        # For test mode, update the base_root to add _test suffix
-        # Strip any existing _test suffix to prevent multiple appends
-        clean_output_dir = config.dataset.output_dir.rstrip("/").rstrip("\\")
-        if clean_output_dir.endswith("_test"):
-            clean_output_dir = clean_output_dir[:-5]
-        base_output_dir = f"{clean_output_dir}_test" if test_run_mode else clean_output_dir
+        base_output_dir = output_dir_for_generation(config.dataset.output_dir, test_run_mode)
         base_root = sanitize_output_dir(base_output_dir)
         family_results, family_root = generate_official_family_set(
             selected_official_family or "Sig53 official set",
             base_root,
             test_mode=test_run_mode,
         )
-        st.session_state.download_zip = build_dataset_zip_bytes(family_root)
-        st.session_state.download_name = f"{family_root.name or 'official_family'}.zip"
+        prepare_download(family_root, f"{family_root.name or 'official_family'}.zip")
         success_prefix = "Test run: Generated" if test_run_mode else "Generated"
         st.success(
             f"{success_prefix} the full official family at "
@@ -1204,20 +1319,14 @@ if generation_scope == "Full official family":
 elif selected_dataset_preset != "Custom":
     paired_button_label = "Generate paired official train/val set (test 10%)" if test_run_mode else "Generate paired official train/val set"
     if st.button(paired_button_label, disabled=paired_generate_disabled, use_container_width=True):
-        # For test mode, update the base_root to add _test suffix
-        # Strip any existing _test suffix to prevent multiple appends
-        clean_output_dir = config.dataset.output_dir.rstrip("/").rstrip("\\")
-        if clean_output_dir.endswith("_test"):
-            clean_output_dir = clean_output_dir[:-5]
-        base_output_dir = f"{clean_output_dir}_test" if test_run_mode else clean_output_dir
+        base_output_dir = output_dir_for_generation(config.dataset.output_dir, test_run_mode)
         base_root = sanitize_output_dir(base_output_dir)
         primary_results, companion_results, group_root = generate_paired_dataset_set(
             selected_dataset_preset,
             base_root,
             test_mode=test_run_mode,
         )
-        st.session_state.download_zip = build_dataset_zip_bytes(group_root)
-        st.session_state.download_name = f"{group_root.name or 'dataset_pair'}.zip"
+        prepare_download(group_root, f"{group_root.name or 'dataset_pair'}.zip")
         success_prefix = "Test run: Generated" if test_run_mode else "Generated"
         st.success(
             f"{success_prefix} paired official datasets at "
@@ -1241,20 +1350,17 @@ else:
     button_label = "Generate test dataset (10%)" if test_run_mode else "Generate dataset"
     button_type = "secondary" if test_run_mode else "primary"
     if st.button(button_label, type=button_type, disabled=generate_disabled):
-        # Apply test mode modifications right before generation
-        if test_run_mode:
-            config.dataset.output_dir = f"{config.dataset.output_dir}_test"
-            config.dataset.total_samples = max(100, int(config.dataset.total_samples * 0.1))
-        results = generate_dataset(config)
-        st.session_state.download_zip = build_dataset_zip_bytes(results["output_dir"])
-        st.session_state.download_name = f"{Path(results['output_dir']).name or 'dataset'}.zip"
+        run_config = build_single_run_config(config, test_mode=test_run_mode)
+        results = generate_dataset(run_config)
+        output_dir = result_output_dir(results)
+        prepare_download(output_dir, f"{Path(output_dir).name or 'dataset'}.zip")
 
         success_prefix = "Test run: Generated" if test_run_mode else "Generated"
         if results["output_format"] == "hdf5":
             st.success(
                 f"{success_prefix} TorchSig-compatible HDF5 dataset at "
-                f"{results['output_dir']} with {config.dataset.total_samples} samples "
-                f"({config.dataset.split_mode})."
+                f"{results['output_dir']} with {run_config.dataset.total_samples} samples "
+                f"({run_config.dataset.split_mode})."
             )
             if test_run_mode:
                 st.info(f"This was a test run. Full dataset would have {int(total_samples):,} samples.")
@@ -1294,6 +1400,11 @@ if st.session_state.download_zip:
         )
         # Free memory immediately
         st.session_state.download_zip = None
+elif st.session_state.get("download_source_dir"):
+    st.warning(
+        "Dataset is too large to package for browser download. "
+        f"Files are available on disk at `{st.session_state.download_source_dir}`."
+    )
 
 st.markdown("---")
 st.subheader("Current Config Snapshot")

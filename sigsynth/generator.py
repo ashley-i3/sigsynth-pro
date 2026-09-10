@@ -6,6 +6,7 @@ import resource
 import shutil
 from pathlib import Path
 import zipfile
+from typing import Any
 
 import numpy as np
 
@@ -19,6 +20,10 @@ from sigsynth.registry import resolve_generator_name
 from sigsynth.registry import to_torchsig_generator_name
 
 
+GenerationResult = dict[str, Any]
+PostTransformWarnings = list[str]
+
+
 def _build_torchsig_metadata(config: AppConfig):
     """Create TorchSig 2.0 metadata using the documented defaults object."""
     try:
@@ -29,9 +34,9 @@ def _build_torchsig_metadata(config: AppConfig):
     generator_tags = {
         tag
         for name in config.generators
-        for tag in GENERATOR_REGISTRY.get(
-            resolve_generator_name(name) or name, GENERATOR_REGISTRY["BPSK"]
-        ).tags
+        for generator in [GENERATOR_REGISTRY.get(resolve_generator_name(name) or name)]
+        if generator is not None
+        for tag in generator.tags
     }
 
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
@@ -122,9 +127,15 @@ def _check_disk_space(output_dir: Path, config: AppConfig) -> None:
         # NumPy files are uncompressed
         compression_factor = 1.0
     else:
-        # HDF5 with gzip level 6 typically achieves 2-4x compression on IQ data
-        # Use conservative estimate of 2.5x for disk space check
-        compression_factor = 0.4  # Means: final size = 40% of uncompressed
+        compression_level = max(0, min(9, int(getattr(config.dataset, "compression_level", 0))))
+        if compression_level <= 0:
+            compression_factor = 1.0
+        elif compression_level <= 3:
+            compression_factor = 0.6
+        elif compression_level <= 6:
+            compression_factor = 0.4
+        else:
+            compression_factor = 0.35
 
     total_samples = config.dataset.total_samples
     estimated_bytes = int(sample_size_bytes * total_samples * compression_factor)
@@ -221,6 +232,15 @@ def _reset_output_dir(output_dir: Path) -> None:
             child.unlink()
 
 
+def compute_directory_size_bytes(output_dir: str | Path) -> int:
+    root = sanitize_output_dir(output_dir)
+    total_bytes = 0
+    for file_path in root.rglob("*"):
+        if file_path.is_file():
+            total_bytes += file_path.stat().st_size
+    return total_bytes
+
+
 def _split_counts(config: AppConfig) -> tuple[int, int, str]:
     split_mode = str(config.dataset.split_mode or "split").lower()
     total_samples = int(config.dataset.total_samples)
@@ -284,7 +304,7 @@ def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
                     if not step.enabled:
                         continue
                     if step.name in NUMPY_POST_TRANSFORMS:
-                        impaired = apply_post_transform(step.name, impaired, config)
+                        impaired = apply_post_transform(step.name, impaired, config, sample_index=sample_index)
                     elif step.name not in post_transform_warnings:
                         post_transform_warnings.add(step.name)
 
@@ -311,64 +331,89 @@ def _generate_numpy_dataset(config: AppConfig, output_dir: Path) -> None:
         config.global_params.pop("post_transform_warnings", None)
 
 
-def generate_dataset(config: AppConfig) -> dict[str, int | str | bool]:
-    # Apply memory limit if configured
-    if config.dataset.max_memory_mb:
+def _set_memory_limit(max_memory_mb: int | None) -> tuple[int | None, tuple[int, int] | None]:
+    if not max_memory_mb:
+        return None, None
+
+    max_bytes = max_memory_mb * 1024 * 1024
+    last_error: Exception | None = None
+    for limit_name in ("RLIMIT_DATA", "RLIMIT_AS"):
         try:
-            max_bytes = config.dataset.max_memory_mb * 1024 * 1024
-            # Use RLIMIT_DATA (heap) instead of RLIMIT_AS (virtual memory)
-            # This avoids issues with memory-mapped HDF5 files
-            resource.setrlimit(resource.RLIMIT_DATA, (max_bytes, max_bytes))
-        except (ValueError, OSError, AttributeError) as e:
-            # Some systems don't support RLIMIT_DATA, try RLIMIT_AS as fallback
-            try:
-                resource.setrlimit(resource.RLIMIT_AS, (max_bytes, max_bytes))
-                print(f"Warning: Using RLIMIT_AS instead of RLIMIT_DATA (may affect HDF5)")
-            except (ValueError, OSError):
-                print(f"Warning: Could not set memory limit: {e}")
+            limit_resource = getattr(resource, limit_name)
+            previous_limits = resource.getrlimit(limit_resource)
+            previous_soft, previous_hard = previous_limits
+            if previous_hard == resource.RLIM_INFINITY:
+                new_soft = max_bytes
+            else:
+                new_soft = min(max_bytes, previous_hard)
+            resource.setrlimit(limit_resource, (new_soft, previous_hard))
+            if limit_name == "RLIMIT_AS":
+                print("Warning: Using RLIMIT_AS instead of RLIMIT_DATA (may affect HDF5)")
+            return limit_resource, previous_limits
+        except (ValueError, OSError, AttributeError) as exc:
+            last_error = exc
 
-    output_dir = sanitize_output_dir(config.dataset.output_dir)
+    print(f"Warning: Could not set memory limit: {last_error}")
+    return None, None
 
-    # Check disk space BEFORE starting generation
+
+def _restore_memory_limit(limit_resource: int | None, previous_limits: tuple[int, int] | None) -> None:
+    if limit_resource is None or previous_limits is None:
+        return
+
     try:
-        _check_disk_space(output_dir, config)
-    except RuntimeError as e:
-        print(f"ERROR: {e}")
+        resource.setrlimit(limit_resource, previous_limits)
+    except (ValueError, OSError, AttributeError) as exc:
+        print(f"Warning: Could not restore memory limit: {exc}")
+
+
+def generate_dataset(config: AppConfig) -> GenerationResult:
+    limit_resource, previous_limits = _set_memory_limit(config.dataset.max_memory_mb)
+    try:
+        output_dir = sanitize_output_dir(config.dataset.output_dir)
+
+        # Check disk space BEFORE starting generation
+        try:
+            _check_disk_space(output_dir, config)
+        except RuntimeError as e:
+            print(f"ERROR: {e}")
+            return {
+                "output_dir": str(output_dir),
+                "output_format": config.dataset.output_format,
+                "train_samples": 0,
+                "val_samples": 0,
+                "torchsig_generated": False,
+                "torchsig_error": str(e),
+                "post_transform_warnings": [],
+            }
+
+        _reset_output_dir(output_dir)
+
+        config.global_params.pop("post_transform_warnings", None)
+        train_count, val_count, _ = _split_counts(config)
+        torchsig_generated = False
+        torchsig_error = ""
+
+        if config.dataset.output_format == "hdf5":
+            torchsig_generated, torchsig_error = _attempt_torchsig_generation(config, output_dir)
+            if not torchsig_generated:
+                write_torchsig_compatible_hdf5(output_dir, config, int(config.dataset.total_samples))
+        else:
+            _generate_numpy_dataset(config, output_dir)
+
+        write_config_yaml(output_dir, config)
+
         return {
             "output_dir": str(output_dir),
             "output_format": config.dataset.output_format,
-            "train_samples": 0,
-            "val_samples": 0,
-            "torchsig_generated": False,
-            "torchsig_error": str(e),
-            "post_transform_warnings": [],
+            "train_samples": train_count,
+            "val_samples": val_count,
+            "torchsig_generated": torchsig_generated,
+            "torchsig_error": torchsig_error or "",
+            "post_transform_warnings": config.global_params.get("post_transform_warnings", []),
         }
-
-    _reset_output_dir(output_dir)
-
-    config.global_params.pop("post_transform_warnings", None)
-    train_count, val_count, _ = _split_counts(config)
-    torchsig_generated = False
-    torchsig_error = ""
-
-    if config.dataset.output_format == "hdf5":
-        torchsig_generated, torchsig_error = _attempt_torchsig_generation(config, output_dir)
-        if not torchsig_generated:
-            write_torchsig_compatible_hdf5(output_dir, config, int(config.dataset.total_samples))
-    else:
-        _generate_numpy_dataset(config, output_dir)
-
-    write_config_yaml(output_dir, config)
-
-    return {
-        "output_dir": str(output_dir),
-        "output_format": config.dataset.output_format,
-        "train_samples": train_count,
-        "val_samples": val_count,
-        "torchsig_generated": torchsig_generated,
-        "torchsig_error": torchsig_error or "",
-        "post_transform_warnings": config.global_params.get("post_transform_warnings", []),
-    }
+    finally:
+        _restore_memory_limit(limit_resource, previous_limits)
 
 
 def build_dataset_zip_bytes(output_dir: str | Path) -> bytes:
@@ -380,3 +425,14 @@ def build_dataset_zip_bytes(output_dir: str | Path) -> bytes:
                 zf.write(file_path, arcname=file_path.relative_to(root))
     memory_file.seek(0)
     return memory_file.getvalue()
+
+
+def result_output_dir(result: GenerationResult) -> str:
+    return str(result["output_dir"])
+
+
+def result_post_transform_warnings(result: GenerationResult) -> PostTransformWarnings:
+    warnings = result.get("post_transform_warnings", [])
+    if isinstance(warnings, list):
+        return [str(item) for item in warnings]
+    return []
