@@ -13,11 +13,18 @@ from sigsynth.registry import resolve_generator_name
 
 
 @dataclass(frozen=True)
+class SynthComponent:
+    data: np.ndarray
+    metadata: dict[str, object]
+
+
+@dataclass(frozen=True)
 class SynthSample:
     generator: str
     clean: np.ndarray
     impaired: np.ndarray
     metadata: dict[str, object]
+    component_signals: tuple[SynthComponent, ...] = ()
 
 
 def _sample_rng(config: AppConfig, sample_index: int, salt: int = 0) -> np.random.Generator:
@@ -28,7 +35,6 @@ def _sample_rng(config: AppConfig, sample_index: int, salt: int = 0) -> np.rando
         seed_offset = 0
     seed = (
         seed_offset
-        + int(config.dataset.total_samples) * 1009
         + int(config.global_params.get("sample_len", 1024)) * 917
         + sample_index * 65537
         + salt * 131071
@@ -151,8 +157,37 @@ def _component_count_schedule(total_samples: int, minimum: int, maximum: int, se
     return tuple(int(x) for x in rng.integers(minimum, maximum + 1, size=total_samples))
 
 
+@lru_cache(maxsize=64)
+def _component_start_schedule(component_counts: tuple[int, ...]) -> tuple[int, ...]:
+    starts: list[int] = []
+    total = 0
+    for count in component_counts:
+        starts.append(total)
+        total += count
+    return tuple(starts)
+
+
 def _generator_family(generator: str) -> str:
     return resolve_generator_name(generator) or generator
+
+
+def _generator_class_name(generator: str) -> str:
+    return str(generator).lower()
+
+
+def _sample_snr_db(config: AppConfig, rng: np.random.Generator) -> float:
+    snr_db = config.global_params.get("snr_db", [0, 30])
+    if isinstance(snr_db, (list, tuple)) and len(snr_db) >= 2:
+        snr_min = float(snr_db[0])
+        snr_max = float(snr_db[1])
+        if snr_min > snr_max:
+            snr_min, snr_max = snr_max, snr_min
+        if np.isclose(snr_min, snr_max):
+            return snr_min
+        return float(rng.uniform(snr_min, snr_max))
+    if isinstance(snr_db, (int, float)):
+        return float(snr_db)
+    return 15.0
 
 
 def _order_from_name(name: str, default: int) -> int:
@@ -249,11 +284,16 @@ def _pulse_shape(symbols: np.ndarray, samples_per_symbol: int) -> np.ndarray:
     upsampled = np.zeros(len(symbols) * samples_per_symbol, dtype=np.complex64)
     upsampled[::samples_per_symbol] = symbols
     taps = _rrc_taps(samples_per_symbol)
-    shaped = lfilter(taps, [1.0], upsampled)
+    shaped = np.asarray(lfilter(taps, [1.0], upsampled))
     return shaped.astype(np.complex64)
 
 
-def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: np.random.Generator) -> np.ndarray:
+def _generate_baseband(
+    generator: str,
+    sample_len: int,
+    sample_rate: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, float]:
     family = _generator_family(generator)
     symbol_rate = _symbol_rate_for(generator, sample_rate, rng)
     samples_per_symbol = max(2, sample_rate // symbol_rate)
@@ -262,7 +302,7 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
     if family == "Tone":
         tone_hz = float(rng.uniform(-0.08, 0.08) * sample_rate)
         t = np.arange(sample_len, dtype=float) / sample_rate
-        return np.exp(1j * 2.0 * np.pi * tone_hz * t).astype(np.complex64)
+        return np.exp(1j * 2.0 * np.pi * tone_hz * t).astype(np.complex64), 1.0
 
     if family == "FM":
         t = np.arange(sample_len, dtype=float) / sample_rate
@@ -270,7 +310,8 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
         mod = np.convolve(mod, np.ones(16) / 16.0, mode="same")
         deviation_hz = float(rng.uniform(0.02, 0.12) * sample_rate)
         phase = 2.0 * np.pi * np.cumsum(mod) * deviation_hz / sample_rate
-        return np.exp(1j * phase).astype(np.complex64)
+        bandwidth_hz = min(sample_rate / 2.0, max(1.0, deviation_hz * 2.5))
+        return np.exp(1j * phase).astype(np.complex64), float(bandwidth_hz)
 
     if family in {"AM", "OOK"}:
         t = np.arange(sample_len, dtype=float) / sample_rate
@@ -282,7 +323,9 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
         if len(shaped) < sample_len:
             shaped = np.pad(shaped, (0, sample_len - len(shaped)), constant_values=shaped[-1] if len(shaped) else 0.0)
         envelope = shaped[:sample_len]
-        return (envelope * np.exp(1j * 2.0 * np.pi * carrier_hz * t)).astype(np.complex64)
+        return (
+            envelope * np.exp(1j * 2.0 * np.pi * carrier_hz * t)
+        ).astype(np.complex64), float(symbol_rate)
 
     if family == "ASK":
         t = np.arange(sample_len, dtype=float) / sample_rate
@@ -295,7 +338,9 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
         if len(envelope) < sample_len:
             envelope = np.pad(envelope, (0, sample_len - len(envelope)), mode="edge")
         carrier_hz = float(rng.uniform(-0.08, 0.08) * sample_rate)
-        return (envelope[:sample_len] * np.exp(1j * 2.0 * np.pi * carrier_hz * t)).astype(np.complex64)
+        return (
+            envelope[:sample_len] * np.exp(1j * 2.0 * np.pi * carrier_hz * t)
+        ).astype(np.complex64), float(symbol_rate)
 
     if family in {"FSK", "GFSK", "MSK", "GMSK"}:
         order = _order_from_name(generator, 4)
@@ -309,20 +354,21 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
         if family in {"GFSK", "GMSK"}:
             freq = np.convolve(freq, np.ones(9) / 9.0, mode="same")
         phase = 2.0 * np.pi * np.cumsum(freq) / sample_rate
-        return np.exp(1j * phase).astype(np.complex64)
+        bandwidth_hz = min(sample_rate / 2.0, max(float(symbol_rate), 0.26 * sample_rate))
+        return np.exp(1j * phase).astype(np.complex64), float(bandwidth_hz)
 
     if family == "LFM":
         t = np.arange(sample_len, dtype=float) / sample_rate
         sweep_hz = float(rng.uniform(0.05, 0.28) * sample_rate)
         chirp_rate = sweep_hz / max(t[-1], 1e-9)
         phase = 2.0 * np.pi * (0.5 * chirp_rate * t**2)
-        return np.exp(1j * phase).astype(np.complex64)
+        return np.exp(1j * phase).astype(np.complex64), float(sweep_hz)
 
     if family == "ChirpSS":
         t = np.arange(sample_len, dtype=float) / sample_rate
         sweep_hz = float(rng.uniform(0.08, 0.18) * sample_rate)
         phase = 2.0 * np.pi * (0.5 * (sweep_hz / max(t[-1], 1e-9)) * t**2)
-        return np.exp(1j * phase).astype(np.complex64)
+        return np.exp(1j * phase).astype(np.complex64), float(sweep_hz)
 
     if family == "OFDM":
         n_subcarriers = int(rng.integers(8, 24))
@@ -337,7 +383,8 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
         time_domain = np.fft.ifft(symbols, axis=1).reshape(-1)
         if len(time_domain) < sample_len:
             time_domain = np.pad(time_domain, (0, sample_len - len(time_domain)))
-        return time_domain[:sample_len].astype(np.complex64)
+        bandwidth_hz = sample_rate * (n_subcarriers / max(1, fft_size))
+        return time_domain[:sample_len].astype(np.complex64), float(bandwidth_hz)
 
     constellation = _constellation_for(generator)
     indices = rng.integers(0, len(constellation), size=num_symbols)
@@ -345,10 +392,10 @@ def _generate_baseband(generator: str, sample_len: int, sample_rate: int, rng: n
     shaped = _pulse_shape(symbols, samples_per_symbol)
     if len(shaped) < sample_len:
         shaped = np.pad(shaped, (0, sample_len - len(shaped)))
-    return shaped[:sample_len].astype(np.complex64)
+    return shaped[:sample_len].astype(np.complex64), float(symbol_rate)
 
 
-def _apply_burst_envelope(signal: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, dict[str, object]]:
+def _apply_burst_envelope(signal: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, dict[str, int]]:
     length = len(signal)
     active_len = int(rng.integers(max(16, length // 2), length))
     start = int(rng.integers(0, max(1, length - active_len + 1)))
@@ -370,37 +417,53 @@ def _upconvert_to_center_frequency(signal: np.ndarray, config: AppConfig) -> tup
     center_frequency_hz = float(config.global_params.get("center_frequency_hz", 0.0))
     t = np.arange(sample_len, dtype=float) / sample_rate
     shifted = signal * np.exp(1j * 2.0 * np.pi * center_frequency_hz * t)
-    return shifted.astype(np.complex64), {"center_frequency_hz": center_frequency_hz}
+    return shifted.astype(np.complex64), {"center_frequency_hz": float(center_frequency_hz)}
 
 
-def _apply_channel_effects(signal: np.ndarray, config: AppConfig, sample_index: int, rng: np.random.Generator) -> tuple[np.ndarray, dict[str, object]]:
+def _apply_channel_effects(
+    signal: np.ndarray,
+    config: AppConfig,
+    sample_index: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, dict[str, float | int]]:
     sample_rate = int(config.global_params.get("sample_rate", 1_000_000))
     sample_len = len(signal)
     t = np.arange(sample_len, dtype=float) / sample_rate
 
-    snr_db = config.global_params.get("snr_db", [0, 30])
-    if isinstance(snr_db, (list, tuple)) and len(snr_db) >= 2:
-        snr_mid = float(snr_db[0] + snr_db[1]) / 2.0
-    else:
-        snr_mid = 15.0
+    sampled_snr_db = _sample_snr_db(config, rng)
 
     frequency_offset = float(rng.uniform(-0.04, 0.04) * sample_rate)
     phase_offset = float(rng.uniform(-np.pi, np.pi))
     timing_jitter = float(rng.uniform(-0.02, 0.02))
+    jitter_samples = int(round(timing_jitter * sample_len))
 
     shifted = signal * np.exp(1j * (2.0 * np.pi * frequency_offset * t + phase_offset))
-    shifted = np.roll(shifted, int(timing_jitter * sample_len))
+    if jitter_samples > 0:
+        shifted = np.concatenate(
+            [
+                np.zeros(jitter_samples, dtype=shifted.dtype),
+                shifted[:-jitter_samples],
+            ]
+        )
+    elif jitter_samples < 0:
+        shifted = np.concatenate(
+            [
+                shifted[-jitter_samples:],
+                np.zeros(-jitter_samples, dtype=shifted.dtype),
+            ]
+        )
 
-    amplitude_imbalance = 1.0 + rng.uniform(-0.12, 0.12)
+    i_gain = 1.0 + rng.uniform(-0.12, 0.12)
+    q_gain = 1.0 + rng.uniform(-0.12, 0.12)
     phase_imbalance = rng.uniform(-0.08, 0.08)
-    i = shifted.real * amplitude_imbalance
-    q = shifted.imag * (2.0 - amplitude_imbalance)
+    i = shifted.real * i_gain
+    q = shifted.imag * q_gain
     rotated_i = i * np.cos(phase_imbalance) - q * np.sin(phase_imbalance)
     rotated_q = i * np.sin(phase_imbalance) + q * np.cos(phase_imbalance)
     impaired = rotated_i + 1j * rotated_q
 
     power = np.mean(np.abs(impaired) ** 2) + 1e-9
-    noise_power = power / (10 ** (snr_mid / 10.0))
+    noise_power = power / (10 ** (sampled_snr_db / 10.0))
     noise = np.sqrt(noise_power / 2.0) * (
         rng.standard_normal(sample_len) + 1j * rng.standard_normal(sample_len)
     )
@@ -415,7 +478,10 @@ def _apply_channel_effects(signal: np.ndarray, config: AppConfig, sample_index: 
         "frequency_offset_hz": frequency_offset,
         "phase_offset_rad": phase_offset,
         "timing_jitter_fraction": timing_jitter,
-        "snr_db": snr_mid,
+        "timing_jitter_samples": jitter_samples,
+        "i_gain": i_gain,
+        "q_gain": q_gain,
+        "snr_db": sampled_snr_db,
         "clip_level": clip_level,
     }
 
@@ -440,7 +506,8 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
     generators = _generator_choices(config)
     class_distribution = str(config.global_params.get("class_distribution", "")).lower()
     weights = _generator_weights(config, generators)
-    start_slot = sum(component_counts[:sample_index]) if component_counts else 0
+    component_starts = _component_start_schedule(component_counts)
+    start_slot = component_starts[sample_index % len(component_starts)] if component_starts else 0
 
     if weights is None and class_distribution == "uniform" and len(generators) > 1:
         total_components = sum(component_counts) if component_counts else component_count
@@ -454,6 +521,9 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
 
     clean = np.zeros(sample_len, dtype=np.complex64)
     components: list[dict[str, object]] = []
+    component_signals: list[SynthComponent] = []
+    class_index_map = {name: index for index, name in enumerate(generators)}
+    dataset_num_signals_max = int(config.global_params.get("num_signals_max", max_components))
     for component_index in range(component_count):
         component_rng = _sample_rng(config, sample_index, salt=component_index + 1)
         if component_schedule:
@@ -461,7 +531,7 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
         else:
             generator = _choose_generator(config, sample_index + component_index, component_rng)
         family = _generator_family(generator)
-        baseband = _generate_baseband(generator, sample_len, sample_rate, component_rng)
+        baseband, bandwidth_hz = _generate_baseband(generator, sample_len, sample_rate, component_rng)
         baseband, burst_meta = _apply_burst_envelope(baseband, component_rng)
 
         component_center = float(
@@ -475,18 +545,43 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
         t = np.arange(sample_len, dtype=float) / sample_rate
         component_clean = baseband * np.exp(1j * 2.0 * np.pi * component_center * t)
         clean += component_clean.astype(np.complex64)
-        components.append(
-            {
-                "generator": generator,
-                "family": family,
-                "center_frequency_hz": component_center,
-                "burst": burst_meta,
-            }
+        class_name = _generator_class_name(generator)
+        burst_start = burst_meta["burst_start"]
+        burst_stop = burst_meta["burst_stop"]
+        duration_in_samples = max(1, burst_stop - burst_start)
+        component_metadata = {
+            "generator": generator,
+            "family": family,
+            "class_name": class_name,
+            "class_index": int(class_index_map.get(generator, 0)),
+            "center_frequency_hz": component_center,
+            "center_freq": component_center,
+            "bandwidth": float(max(1.0, min(sample_rate / 2.0, bandwidth_hz))),
+            "_lower_frequency": float(component_center - (bandwidth_hz / 2.0)),
+            "_upper_frequency": float(component_center + (bandwidth_hz / 2.0)),
+            "center_freq_set": True,
+            "sample_rate": sample_rate,
+            "num_iq_samples_dataset": sample_len,
+            "duration_in_samples": duration_in_samples,
+            "start_in_samples": burst_start,
+            "num_signals_max": dataset_num_signals_max,
+            "burst": burst_meta,
+        }
+        components.append(component_metadata)
+        component_signals.append(
+            SynthComponent(
+                data=component_clean.astype(np.complex64),
+                metadata=component_metadata,
+            )
         )
 
     primary_generator = components[0]["generator"] if components else _choose_generator(config, sample_index, rng)
     primary_family = _generator_family(str(primary_generator))
     impaired, impairment_meta = _apply_channel_effects(clean, config, sample_index, rng)
+    sampled_snr_db = float(impairment_meta.get("snr_db", 0.0))
+    for component in components:
+        component["snr_db"] = sampled_snr_db
+        component["dataset_length"] = int(config.dataset.total_samples)
 
     metadata = {
         "sample_index": sample_index,
@@ -500,7 +595,13 @@ def synthesize_sample(config: AppConfig, sample_index: int) -> SynthSample:
         "impairments": impairment_meta,
     }
 
-    return SynthSample(generator=str(primary_generator), clean=clean, impaired=impaired, metadata=metadata)
+    return SynthSample(
+        generator=str(primary_generator),
+        clean=clean,
+        impaired=impaired,
+        metadata=metadata,
+        component_signals=tuple(component_signals),
+    )
 
 
 def synthesize_dataset_pair(config: AppConfig, sample_index: int) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
