@@ -4,6 +4,7 @@ import gc
 import io
 import resource
 import shutil
+import warnings
 from pathlib import Path
 import zipfile
 from typing import Any
@@ -22,6 +23,35 @@ from sigsynth.registry import to_torchsig_generator_name
 
 GenerationResult = dict[str, Any]
 PostTransformWarnings = list[str]
+
+
+def _validate_sig53_generators(config: AppConfig) -> tuple[bool, list[str]]:
+    """Check if generators match the Sig53 specification (informational only).
+
+    Returns:
+        (is_valid, messages): is_valid is True when the config holds exactly the
+        53 Sig53 modulations; messages is a list of informational strings.
+    """
+    from sigsynth.registry import SIG53_MODULATIONS, _normalize_registry_key
+
+    normalized_generators = {_normalize_registry_key(name) for name in config.generators}
+    sig53_normalized = {_normalize_registry_key(name) for name in SIG53_MODULATIONS}
+
+    messages: list[str] = []
+    extra_mods = normalized_generators - sig53_normalized
+    missing_mods = sig53_normalized - normalized_generators
+
+    if extra_mods:
+        messages.append(
+            f"Extra modulations not in Sig53: {sorted(extra_mods)[:5]}{'...' if len(extra_mods) > 5 else ''}"
+        )
+    if missing_mods:
+        messages.append(
+            f"Missing Sig53 modulations: {sorted(missing_mods)[:5]}{'...' if len(missing_mods) > 5 else ''}"
+        )
+
+    is_valid = len(normalized_generators) == 53 and not extra_mods and not missing_mods
+    return is_valid, messages
 
 
 def _build_torchsig_metadata(config: AppConfig):
@@ -115,6 +145,16 @@ def _build_torchsig_metadata(config: AppConfig):
         metadata["num_signals_min"] = 1
         metadata["num_signals_max"] = 1
 
+    # Validate Sig53 compatibility if class_list is "all" (informational only)
+    if class_list == "all":
+        is_valid, validation_info = _validate_sig53_generators(config)
+        if not is_valid:
+            print("\nINFO: Generator list differs from original Sig53 specification (53 modulations):")
+            for msg in validation_info:
+                print(f"  {msg}")
+            print(f"  Current generator count: {len(config.generators)}")
+            print("  Note: Generation will proceed with your custom configuration.")
+
     return metadata
 
 
@@ -185,6 +225,10 @@ def _attempt_torchsig_generation(config: AppConfig, output_dir: Path) -> tuple[b
     dataloader = None
     dataset = None
     try:
+        # Suppress TorchSig's "signal too large to fit in spectrogram" warning.
+        # This is expected for narrowband signals and does not indicate a problem.
+        warnings.filterwarnings("ignore", message="generated signal is too large to fit in spectrogram")
+
         metadata = _build_torchsig_metadata(config)
         batch_size = config.dataset.create_batch_size
         torchsig_generators = [
