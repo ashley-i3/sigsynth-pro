@@ -38,7 +38,7 @@ def _sample_rng(config: AppConfig) -> np.random.Generator:
         seed_offset = 0 if base_seed is None else int(base_seed) * 2654435761
     except (TypeError, ValueError):
         seed_offset = 0
-    seed = seed_offset + int(config.dataset.total_samples) * 17 + int(config.global_params.get("sample_len", 1024))
+    seed = seed_offset + int(config.global_params.get("sample_len", 1024))
     return np.random.default_rng(seed=seed)
 
 
@@ -125,19 +125,26 @@ def build_transform_preview(config: AppConfig, transform_names: list[str], max_s
     return stages
 
 
-def _zoom_spectrogram(data: np.ndarray, target_fraction: float = 0.35) -> np.ndarray:
-    if data.ndim != 2 or data.shape[0] < 8:
-        return data
+def _zoom_spectrogram(
+    data: np.ndarray,
+    sample_rate: int,
+    target_fraction: float = 0.35,
+) -> tuple[np.ndarray, np.ndarray]:
+    if data.ndim != 2 or data.shape[0] < 2:
+        freq_bins = np.fft.fftshift(np.fft.fftfreq(max(data.shape[0], 1), d=1.0 / sample_rate))
+        return np.fft.fftshift(data, axes=0), freq_bins
 
-    energy = np.mean(np.abs(data), axis=1)
+    shifted = np.fft.fftshift(data, axes=0)
+    freq_bins = np.fft.fftshift(np.fft.fftfreq(shifted.shape[0], d=1.0 / sample_rate))
+    energy = np.nanmean(shifted, axis=1)
     center = int(np.argmax(energy))
     half_span = max(16, int(data.shape[0] * target_fraction / 2.0))
     start = max(0, center - half_span)
-    stop = min(data.shape[0], center + half_span)
+    stop = min(shifted.shape[0], center + half_span)
     if stop - start < 8:
         start = max(0, center - 4)
-        stop = min(data.shape[0], center + 4)
-    return data[start:stop, :]
+        stop = min(shifted.shape[0], center + 4)
+    return shifted[start:stop, :], freq_bins[start:stop]
 
 
 def _upsample_for_spectrogram(signal: np.ndarray, target_len: int = 16384) -> np.ndarray:
@@ -183,8 +190,8 @@ def render_preview_figure(stages: list[PreviewStage], config: AppConfig):
     for ax, stage in zip(axes, stages):
         data = stage.data
         if data.ndim == 2:
-            # Spectrogram: frequency on y-axis, time on x-axis
-            data = _zoom_spectrogram(data)
+            # Spectrogram: shift DC to the center, then zoom around the active band.
+            data, freq_bins_hz = _zoom_spectrogram(data, sample_rate)
             finite = np.isfinite(data)
             if np.any(finite):
                 vmin = float(np.nanpercentile(data[finite], 5))
@@ -193,46 +200,30 @@ def render_preview_figure(stages: list[PreviewStage], config: AppConfig):
                 vmin, vmax = -80.0, 0.0
             if np.isclose(vmin, vmax):
                 vmin, vmax = vmin - 1.0, vmax + 1.0
-            ax.imshow(data, aspect="auto", origin="lower", cmap="magma", vmin=vmin, vmax=vmax)
-
-            # Convert y-axis (frequency bins) to actual frequencies
-            freq_bins = data.shape[0]
-            nyquist = sample_rate / 2.0
-            freq_range = np.linspace(-nyquist, nyquist, freq_bins)
-            _, freq_unit = _format_frequency_axis(nyquist)
+            peak_frequency = max(
+                abs(float(freq_bins_hz[0])) if len(freq_bins_hz) else 0.0,
+                abs(float(freq_bins_hz[-1])) if len(freq_bins_hz) else 0.0,
+            )
+            _, freq_unit = _format_frequency_axis(peak_frequency)
             freq_scale = 1e9 if freq_unit == "GHz" else 1e6 if freq_unit == "MHz" else 1e3 if freq_unit == "kHz" else 1.0
-
-            # Set y-axis ticks and labels (both at once to avoid warning)
-            y_tick_positions = ax.get_yticks()
-            y_labels = []
-            valid_ticks = []
-            for tick in y_tick_positions:
-                if 0 <= tick < freq_bins:
-                    valid_ticks.append(tick)
-                    freq_hz = freq_range[int(tick)]
-                    y_labels.append(f"{freq_hz / freq_scale:.1f}")
-            if valid_ticks:
-                ax.set_yticks(valid_ticks, y_labels)
-            ax.set_ylabel(f"Frequency ({freq_unit})")
-
-            # Convert x-axis (time bins) to actual time
-            time_bins = data.shape[1]
             duration_s = sample_len / sample_rate
             _, time_unit = _format_time_axis(duration_s)
             time_scale = 1.0 if time_unit == "s" else 1e-3 if time_unit == "ms" else 1e-6 if time_unit == "μs" else 1e-9
-            ax.set_xlabel(f"Time ({time_unit})")
 
-            # Set x-axis ticks and labels (both at once to avoid warning)
-            x_tick_positions = ax.get_xticks()
-            x_labels = []
-            valid_ticks = []
-            for tick in x_tick_positions:
-                if 0 <= tick < time_bins:
-                    valid_ticks.append(tick)
-                    time_s = (tick / time_bins) * duration_s
-                    x_labels.append(f"{time_s / time_scale:.1f}")
-            if valid_ticks:
-                ax.set_xticks(valid_ticks, x_labels)
+            freq_min = float(freq_bins_hz[0] / freq_scale) if len(freq_bins_hz) else 0.0
+            freq_max = float(freq_bins_hz[-1] / freq_scale) if len(freq_bins_hz) else 0.0
+            ax.imshow(
+                data,
+                aspect="auto",
+                origin="lower",
+                cmap="magma",
+                vmin=vmin,
+                vmax=vmax,
+                extent=[0.0, duration_s / time_scale, freq_min, freq_max],
+            )
+
+            ax.set_ylabel(f"Frequency ({freq_unit})")
+            ax.set_xlabel(f"Time ({time_unit})")
 
         elif np.iscomplexobj(data):
             # Time-domain IQ plot
@@ -261,3 +252,7 @@ def render_preview_figure(stages: list[PreviewStage], config: AppConfig):
         ax.set_title(stage.name)
 
     return fig
+
+
+def close_preview_figure(fig) -> None:
+    plt.close(fig)
